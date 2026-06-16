@@ -259,7 +259,7 @@ test("image_url content part reaches upstream byte-intact (multimodal passthroug
 // ── Error classification ────────────────────────────────────────────────────
 // The proxy must distinguish fm serve's two mid-stream failure modes so clients can
 // branch: rate-limit (retry) vs safety-guardrail abort (terminal). See fm-proxy.js
-// header comment + bench/BENCHMARKS.md.
+// header comment.
 
 test("classifyError: safety-guardrail abort is terminal and typed", () => {
   const c = classifyError("The model's safety guardrails were triggered.");

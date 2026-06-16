@@ -26,8 +26,7 @@ const PROXY_PORT = Number(process.env.PROXY_PORT) || 1977;
 //      ("The model's safety guardrails were triggered."). Deterministic + terminal +
 //      PCC-only — retrying the identical request re-fails at the identical point, so we
 //      do NOT retry; we surface it at once. Benign code triggers it, so it is NOT a
-//      judgment that the user's content is unsafe. See bench/BENCHMARKS.md +
-//      memory pcc-codegen-abort.
+//      judgment that the user's content is unsafe.
 // classifyError() maps each to an OpenAI-shaped outcome so clients can branch without
 // string-matching Apple's prose:
 //   - guardrail      → finish_reason:"content_filter" (keep partial; NOT an error — the

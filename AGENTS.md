@@ -128,7 +128,7 @@ The proxy is a drop-in OpenAI endpoint — point any OpenAI client at it and go:
     Deterministic + terminal (retrying the identical request re-fails identically), so
     don't retry; change the request (rephrase, simplify, or switch to `model=system`).
     Benign code triggers it — it is **not** a judgment that your content is unsafe.
-    (Observed on ~27% of code-generation prompts on `pcc`; 0% on `system`.)
+    PCC-only; `system` is unaffected.
   - `type: "service_unavailable"` (`code: "model_unavailable"`) — `"PCC inference is not
     available in this context"` (ModelManagerError 1013, HTTP 503): PCC attribution is
     missing. Terminal — usually means `fm serve` isn't a direct child of your
@@ -207,5 +207,10 @@ fm serve honors OpenAI `response_format: {type:"json_schema", json_schema:{name,
 every object level (same as `fm schema object`). **Flat schemas work; nested objects
 currently fail** with `GenerationSchema duplicateType` — the same nesting wall as the tool
 path. So it can't yet replace the JSON-string round-trip for nested params; it's usable for
-flat params and terminal structured answers. Recheck on fm updates — if the bug is fixed we
-can enforce nested shapes at decode time and drop the embedded-schema prose.
+flat params and terminal structured answers.
+
+To recheck after an fm update: send a `response_format` request with a two-level nested
+schema (e.g. an object with a property whose type is also an object). If the response comes
+back decoded rather than erroring with `GenerationSchema duplicateType`, the bug is fixed —
+at that point the JSON-string round-trip for nested tool params can be replaced with native
+constrained decoding end-to-end.
