@@ -21,6 +21,47 @@ instead of re-deriving help text:
 Source of truth is the installed binary (`/usr/bin/fm`): the docs reflect whatever
 version is on disk, so regenerate rather than hand-editing.
 
+### Fingerprinting the `fm` version (no `--version` flag)
+
+`fm --version` does **not** exist (errors "Unknown option"). To detect when Apple ships a
+new `fm`/FoundationModels build across macOS betas, fingerprint the binary:
+
+| What | How | Beta 2 value | Beta 3 value |
+|---|---|---|---|
+| fm source version | `otool -l /usr/bin/fm \| grep -A2 LC_SOURCE_VERSION` | `2.0.55.1.402` | `2.0.59` |
+| Framework version | `plutil -p /System/Library/Frameworks/FoundationModels.framework/Resources/Info.plist \| grep CFBundleVersion` | `2.0.55.1.402` | `2.0.59` |
+| Runtime version | `codesign -dvvv /usr/bin/fm` → `Runtime Version=` | `27.0.0` | `27.0.0` |
+| Rebuild date | `ls -la /usr/bin/fm` (mtime) | Jun 19 2026 | Jul 3 2026 |
+| macOS build | `sw_vers` → `BuildVersion` | `26A5368g` (27.0 Beta 2) | `26A5378j` (27.0 Beta 3) |
+
+Audit recipe after any OS update:
+1. **Structure** — `python3 tools/gen-fm-docs.py --outdir /tmp/fmnew` then
+   `diff docs/fm-reference.md /tmp/fmnew/fm-reference.md`. (Beta 2: byte-identical to Beta 1.
+   Beta 3: **changed** — "JSON schema" wording → "structured output schema" throughout, and
+   `fm schema object --help`'s USAGE examples now show a `--nested <name>` flag. That flag
+   does **not** actually exist (`Unknown argument: --nested`); the OPTIONS list still
+   documents the real, working flag `--object <name>`. Treat this as a bug in Apple's help
+   text, not a rename — keep using `--object`.)
+2. **Behavior** — the help tree can stay identical while behavior changes (or vice versa,
+   per Beta 3), so re-test the known walls separately:
+   - nested-schema `duplicateType` — **FIXED in Beta 3**, for both `response_format`
+     (verified via `fm respond --schema` and `response_format` json_schema over
+     `/v1/chat/completions`, using a real `$defs`/`$ref` nested schema) and **tool
+     parameters** (verified directly: nested object, array<object>, object-in-object,
+     object → array → object all decode correctly through `tools`/`tool_calls`). Was
+     broken Beta 1–2. Two shapes remain broken on the tool-parameter path even in
+     Beta 3 — see "Nested params" below.
+   - `response_format` `required`-array / `title`+`x-order` dialect — still enforced, but
+     narrower than originally thought: only for object schemas reached through `$defs`,
+     not "every object level" (flat and inline-nested schemas need none of it — see
+     "Structured output" below). `fm-proxy.js` now injects the dialect into `$defs`
+     automatically. Tool parameters, by contrast, need **no** title/x-order dialect at all.
+   - non-streaming `usage.prompt_tokens` — **FIXED in Beta 3.** Verified live against
+     `fm token-count`: values now match exactly (was hardcoded `0`). Streaming still
+     sends no `usage` at all — unchanged, still needs the proxy's fill-in.
+   - on-device `system` model actually running inference — healthy again in Beta 3 (Beta 2
+     was flaky right after update — see Known limits).
+
 ## Tool calling with Pi (PCC + rich schemas) — runbook
 
 An in-process app cannot do PCC inference (it's gated on the Apple-private entitlement
@@ -33,24 +74,47 @@ Pi  ──▶  fm-proxy.js (:1977)  ──▶  Apple `fm serve` (:1976)
          flattens tool schemas      entitled engine: system + pcc, runs tools
 ```
 
-Apple's `fm serve` has very limited JSON-Schema support for tool parameters (flat only:
-no nested `type:"object"`, no array-of-objects, no `anyOf/allOf/oneOf/$ref/$defs/
-patternProperties`; root `required` must be present). `fm-proxy.js` rewrites incoming tool
-schemas so Pi's rich definitions are accepted.
+Apple's `fm serve` has some remaining JSON-Schema gaps for tool parameters (root
+`required` must be present; no `anyOf/allOf/oneOf/$ref/$defs/patternProperties`).
+`fm-proxy.js` rewrites incoming tool schemas so Pi's rich definitions are accepted.
 
-**Nested params use a lossless JSON-string round-trip.** A param fm can't represent
-(nested object, or array whose items are objects — e.g. Pi's `edit` tool with
-`edits: [{oldText, newText}]`) is declared to fm as a `type:"string"` whose description
-says "… JSON string matching: {schema}". The model returns JSON in that string, and the
-proxy re-parses it back into the real object/array in the tool_call's `arguments` before
-forwarding to Pi — so the client sees the exact nested shape its tool validates against.
-Flat tools (e.g. `write`) pass through untouched.
+**Every tool needs a non-null `function.description`, even a no-argument tool.**
+Verified live (Beta 3 / fm 2.0.59): `fm serve` 400s the **entire** request —
+`"Invalid JSON: The data couldn't be read because it is missing."` — if *any* tool
+in the array has `function.description` absent or `null`, regardless of that tool's
+`parameters` shape, `tool_choice`, or which tool the model actually ends up calling.
+An empty string (`""`) is accepted. This was originally misdiagnosed as an
+empty-`parameters.properties` bug (a no-arg tool naturally invites a minimal test
+schema that also omits `description`), but a non-empty-schema tool with no
+description hits the identical 400, and a no-arg tool *with* a description (even
+`""`) works fine — so the real trigger is the missing description key, unrelated to
+parameter shape. OpenAI's tool-calling spec makes `description` optional, so a
+compliant client can legitimately send the shape that breaks `fm serve`.
+`fm-proxy.js`'s `fixTools` backfills a missing/null `function.description` to `""`
+before forwarding, so client-supplied no-description tools (common for simple
+no-argument actions) work transparently instead of erroring.
 
-The embedded schema and every property are stripped of decorative keys fm ignores
-(`description` on nested fields, `title`, `examples`, `default`, `$id`, …) before
-serialization — pure token savings (~31% on a sample nested tool, 177→122 tokens via
-`fm token-count`) with no loss of shape. See `EMBED_STRIP_KEYS` / `STRIP_KEYS` in
-`fm-proxy.js`.
+**Nested objects and array-of-objects decode natively as of macOS 27 Beta 3 (fm
+2.0.59).** The `GenerationSchema duplicateType` bug that used to force every nested
+object through a JSON-string round-trip is fixed — verified live against a real
+`fm serve`: one level of object nesting, array<object> (e.g. Pi's `edit` tool with
+`edits: [{oldText, newText}]`), object-in-object (chain depth 2), and
+object → array → object all decode correctly with no round-trip. Two shapes are
+**still broken**, verified live and narrowly detected by `needsJsonRoundTrip`:
+- `array<array<object>>` (an object reached through 2+ consecutive array wrappers)
+  — the model silently omits the argument. `array<array<number>>` is fine.
+- A chain of 3+ directly-nested object types (object → object → object) — the
+  model leaks its internal `$defs` registration into the argument. 2 levels is
+  fine, and an intervening array resets the chain.
+
+Only those two residual shapes still use the lossless JSON-string round-trip: the
+param is declared to fm as a `type:"string"` whose description says "… JSON string
+matching: {schema}", the model returns JSON in that string, and the proxy re-parses
+it back into the real object/array in the tool_call's `arguments` before forwarding
+to Pi. The embedded schema is stripped of decorative keys fm ignores (`description`
+on nested fields, `title`, `examples`, `default`, `$id`, …) before serialization —
+pure token savings with no loss of shape. See `EMBED_STRIP_KEYS` / `STRIP_KEYS` /
+`needsJsonRoundTrip` in `fm-proxy.js`.
 
 ### Start it (from a Terminal signed into Apple Intelligence — PCC needs the attribution)
 
@@ -77,8 +141,10 @@ Use **Ctrl-C to stop** — the trap on INT/TERM/HUP/EXIT reaps the proxy. Do **n
 Ctrl-Z: a suspended foreground `fm serve` isn't reaped and will strand the port
 (`kill -9` the `fm serve` PID to recover). fm serve's own output is untagged (piping it
 is untested for attribution safety); only the proxy's output is tagged.
-Errors/retries/overflows are **always** shown even without `--verbose`; only the routine
-per-request telemetry is hidden. Ports/binary are overridable: `--fm-port`,
+Errors/retries/overflows are **always** shown even without `--verbose`, as is the
+per-completion **`[toks]` throughput counter** (`out=… dur=… ttft=… => N.N tok/s` —
+completion tok/s with time-to-first-token for streaming); only the routine
+`[assembled]` per-request telemetry is hidden. Ports/binary are overridable: `--fm-port`,
 `--proxy-port`, `--fm-bin`, `--health-timeout` (or the `FM_PORT`/`PROXY_PORT` env vars).
 
 **Manual (two tabs)**, if you want the processes separated:
@@ -136,15 +202,36 @@ The proxy is a drop-in OpenAI endpoint — point any OpenAI client at it and go:
   - `type: "rate_limit_exceeded"` (`code: -1`) — PCC capacity/rate-limit
     (`LanguageModelError -1`), transient. The proxy retries these with backoff before
     surfacing; if you still see one, back off and retry.
+  - `type: "invalid_request_error"` (`code: "tool_choice_unsupported"`) — `model:"system"`
+    with a forced `tool_choice` (`"required"`, or a specific `{type:"function",...}`
+    pin) crashes fm serve's `system` engine with the *identical* `LanguageModelError -1`
+    signature used for PCC rate-limiting. Deterministic and permanent (retrying re-fails
+    identically), so the proxy checks the original request and does **not** retry it —
+    without this check it would retry-loop a permanent bug for ~19.5s before surfacing it
+    mislabeled as `rate_limit_exceeded`. `pcc` handles forced `tool_choice` fine; switch
+    models or use `tool_choice:"auto"`/omit it to work around this on `system`.
   - `type: "server_error"` (`code: "internal_error"` / `"upstream_unreachable"`) —
     anything else, including the `502` when `fm serve` is down.
 
 ### Known limits
 
-- Tool/`response_format` **nested** schemas are flattened or JSON-string round-tripped;
-  fm serve's constrained decoder can't enforce nested shapes natively yet (see
-  "Structured output" below).
+- Tool-parameter **nested** schemas decode natively as of Beta 3, except two shapes
+  still verified broken — `array<array<object>>` and a chain of 3+ directly-nested
+  objects — which still fall back to a JSON-string round-trip (see "Nested params"
+  above). `response_format` nested schemas are untouched by the proxy (forwarded
+  as-is) — see "Structured output" below for their own dialect requirements.
 - `n > 1` (multiple choices) is not honored — fm serve returns a single completion.
+- `parallel_tool_calls: false` is **not honored** — fm serve accepts the field (200,
+  no error) but ignores it entirely. Verified live: identical multi-tool-call responses
+  whether the field is `true`, `false`, or omitted, on `tool_choice:"auto"`, both
+  directly against `fm serve` and through the real proxy (streaming and non-streaming).
+  The proxy deliberately does **not** emulate this by truncating the response to one
+  `tool_call` — OpenAI's real semantics constrain *generation* so only one call is ever
+  produced, whereas post-hoc truncation would silently discard tool calls the model
+  already decided were necessary, corrupting the conversation with no error signal
+  (worse than passing all of them through, since most tool-calling clients iterate the
+  whole `tool_calls` array regardless of what they requested). Treated the same as
+  `n > 1`: a real fm serve gap, documented rather than faked.
 - Sampling params (`temperature`, `top_p`, `stop`, …) are passed through as-is; whatever
   `fm serve` supports applies.
 
@@ -155,23 +242,44 @@ The proxy is a drop-in OpenAI endpoint — point any OpenAI client at it and go:
 
 ### Token usage repair
 
-Apple's `fm serve` reports usage wrong: non-streaming sends `prompt_tokens: 0`, and
-streaming sends no `usage` at all — so Pi's context gauge sits at ~0%. The proxy repairs
-this using Apple's own `fm token-count` (exact, same tokenizer family):
+Apple's `fm serve` used to report usage wrong on both paths — non-streaming sent
+`prompt_tokens: 0`, streaming sent no `usage` at all. **As of Beta 3 (fm 2.0.59),
+non-streaming is fixed**: verified live against `fm token-count`, the reported
+`prompt_tokens` now matches exactly, and it already reflects the **full assembled**
+prompt (messages + tool schemas + tool_calls + per-turn framing) — fm serve's own
+number, not an estimate. The proxy passes non-streaming usage through untouched.
 
-- **non-streaming:** overwrite `prompt_tokens` with the exact count of the request
-  messages (system → `-i` instructions, rest → prompt via stdin).
-- **streaming:** suppress the upstream `[DONE]`, accumulate completion text from the
-  deltas, then inject a final `usage` chunk (exact prompt + exact completion) followed by
-  a single `[DONE]`.
+**Streaming now gets fm serve's own real usage too — fixed by forcing the opt-in.**
+`fm serve` only sends a real final usage chunk on a streaming completion when the
+request carries the standard OpenAI `stream_options:{include_usage:true}` opt-in, and
+real clients (Pi included) essentially never set it. The proxy now forces that flag
+on every streaming request it forwards upstream, regardless of what the client sent,
+captures fm serve's real final usage-only chunk (`choices:[]` + `usage`), and relays
+it to the client — verified live for both plain-text (`finish_reason:"stop"`) and
+tool-call (`finish_reason:"tool_calls"`) completions, `prompt_tokens`/`completion_tokens`
+both accurate. The old completion-text-based estimate (via `fm token-count`, with a
+`9 + chars/4.4` heuristic fallback) survives only as a fallback for upstreams that
+don't cooperate — e.g. a pre-Beta-3 `fm serve`, or a safety-guardrail abort that never
+reaches a clean finish and so never gets a real usage chunk from fm serve either.
 
-A `9 + chars/4.4` heuristic is the fallback if `fm token-count` is unavailable.
+The proxy still suppresses the upstream `[DONE]` and re-emits its own final chunk
+either way, so clients reading the last chunk always get *some* usage. The **client's
+own** `stream_options.include_usage` ask is honored separately, on the way back out:
+explicit `include_usage:false` suppresses the usage field in the relayed stream
+(matching vanilla OpenAI shape for an explicit opt-out) — decided this way because a
+client that explicitly asks not to receive usage shouldn't see it just because the
+proxy needs it upstream for its own accounting. Absent or `true` keeps the proxy's
+established always-on usage chunk, the behavior that already existed before this fix
+(a synthesized number), just backed by real figures now. The finish_reason itself is
+still always emitted even when usage is declined: for a content_filter abort it's
+*only* ever carried by this final chunk (the abort's own error frame is swallowed
+elsewhere in the pipeline), so opting out of usage can't also silently drop it.
 
-The reported `prompt_tokens` is the **full assembled** total (messages + tool schemas
-+ tool_calls + per-turn framing), so Pi's gauge reflects the real ~32k budget rather
-than the messages-only slice that read ~4x low. Set `GAUGE_MODE=msgs` to revert to the
-messages-only number. Also set Pi's FM provider context size to **32768** so the gauge
-*percentage* scales correctly.
+For the fallback-estimate path only, the injected `prompt_tokens` is the proxy's own
+**assembled** estimate (messages + tool schemas + tool_calls + per-turn framing) — an
+approximation, not fm serve's own count. Set `GAUGE_MODE=msgs` to revert to the
+messages-only number for that estimate. Also set Pi's FM provider context size to
+**32768** so the gauge *percentage* scales correctly.
 
 ### Context budget — why Pi's gauge lies, and PCC's real ceiling
 
@@ -195,22 +303,52 @@ things fm serve *does* frame into the prompt, so the gauge reads far lower than 
 and flags the failing request (`*** CONTEXT EXCEEDED ***`, `*** UPSTREAM STREAM ABORTED ***`).
 Note: `tools=` *under*-counts fm serve's true per-tool framing (it counts raw JSON; fm adds
 scaffolding), so with a fat toolset the real prompt is even bigger than `assembled` shows —
-which is why a full toolset can fail while the gauge looks comfortable. **Keep tools lean**
-(`pi-minimal`) to reclaim most of the 32k window. The `system` model (separate, smaller
-on-device window) is useful as a *free local compactor* of old turns before they hit PCC —
-not as overflow storage.
+which is why a full toolset can fail while the gauge looks comfortable. This under-count
+only affects the **streaming** gauge now — non-streaming gets fm serve's own real
+`prompt_tokens` (see "Token usage repair" above), which already reflects the true
+framing cost. **Keep tools lean** (`pi-minimal`) to reclaim most of the 32k window. The
+`system` model (separate, smaller on-device window) is useful as a *free local
+compactor* of old turns before they hit PCC — not as overflow storage.
 
-### Structured output (`response_format`) — partial, recheck later
+### Structured output (`response_format`)
 
 fm serve honors OpenAI `response_format: {type:"json_schema", json_schema:{name, schema}}`
-(undocumented; constrained decoding is real). Its dialect needs `title` + `x-order` on
-every object level (same as `fm schema object`). **Flat schemas work; nested objects
-currently fail** with `GenerationSchema duplicateType` — the same nesting wall as the tool
-path. So it can't yet replace the JSON-string round-trip for nested params; it's usable for
-flat params and terminal structured answers.
+(undocumented; constrained decoding is real).
 
-To recheck after an fm update: send a `response_format` request with a two-level nested
-schema (e.g. an object with a property whose type is also an object). If the response comes
-back decoded rather than erroring with `GenerationSchema duplicateType`, the bug is fixed —
-at that point the JSON-string round-trip for nested tool params can be replaced with native
-constrained decoding end-to-end.
+**The dialect requirement is narrower than first found, and the proxy now fixes it.**
+The original (2026-06-14) finding said fm's `title`/`x-order`/`required`/
+`additionalProperties` dialect was needed "on every object level" — but that was only
+ever tested against a `$defs`/`$ref`-shaped schema. Re-verified live (2026-07-06, fm
+2.0.59): the dialect is required **only on object schemas reached through `$defs`** (the
+`$defs` entries themselves, and any object nested inside one — inline sub-properties,
+array items — recursively). The **top-level schema** and any object reached **purely
+through inline `properties` nesting** (never touching `$defs`) — flat schemas,
+multi-level inline nesting, arrays of inline objects — decode with **zero** dialect keys.
+Missing a required dialect key on a `$defs` object raises a specific error naming it
+(`keyNotFound 'x-order'`, "Object schemas require a 'title' key", a missing `required`, a
+missing `additionalProperties`); a `$ref` pointing at a non-object `$defs` entry (e.g. an
+array wrapper defined directly under `$defs`) also fails (`undefinedReferences`) — keep
+array wrappers inline and put only the referenced object type in `$defs`, which is what
+real generators already do.
+
+This still matters in practice: real schema generators (pydantic's
+`.model_json_schema()`, zod-to-json-schema, TypeBox, …) virtually always emit
+`$defs`/`$ref` for any named or reused type, so an ordinary client sending a plain,
+undecorated schema with `$defs` would 400 against raw `fm serve`. **`fm-proxy.js` now
+fixes this** (`fixResponseFormatSchema`, wired into `fixTools`): it walks
+`response_format.json_schema.schema.$defs` and injects `title` (from the `$defs` key, or
+the capitalized property name for anything nested deeper), `x-order` (the object's own
+property order), `required` (preserved from the caller, filtered to real properties, else
+`[]`), and `additionalProperties:false` (unless already boolean) — recursively, including
+into array items. The top-level schema and any `$defs`-free inline nesting are left
+exactly as sent, since decorating them is unnecessary token bloat, not a requirement.
+Both flat and `$defs`/`$ref`-nested requests, streaming and non-streaming, verified live
+end-to-end through the real running proxy.
+
+**Nested objects work as of Beta 3** (fixed alongside the tool-parameter path — see
+"Nested params" above): a two-level nested schema (`$defs`/`$ref`) decodes correctly via
+both `fm respond --schema` and `response_format` over `/v1/chat/completions`, once the
+`$defs` dialect above is present. Not retested: whether `response_format`'s nested
+support has the same residual gaps as the tool path (`array<array<object>>`, 3+ chained
+objects) — if you hit either there, it likely applies here too since both paths share the
+same underlying `GenerationSchema` engine.

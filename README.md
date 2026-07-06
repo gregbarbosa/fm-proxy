@@ -3,7 +3,7 @@
 **An OpenAI-compatible API endpoint for the Apple Foundation Models CLI (`fm`).**
 
 macOS 27.0 ships a beta `fm` CLI to run Apple Foundation Models
-on-device (`system`) and on Apple's Private Cloud Compute (`pcc`). It includes a Chat Completions local server (`fm serve`), but tool-calling schema support is limited and token-usage reporting is broken.
+on-device (`system`) and on Apple's Private Cloud Compute (`pcc`). It includes a Chat Completions local server (`fm serve`), but tool-calling schema support still has a couple of rough edges and streaming token-usage reporting requires an opt-in flag most clients never set.
 
 `fm-proxy` sits in front of `fm serve` to give you an **OpenAI-compatible Chat Completions endpoint**. Point any OpenAI client at the local URL and use Apple's models with no code changes.
 
@@ -12,8 +12,10 @@ on-device (`system`) and on Apple's Private Cloud Compute (`pcc`). It includes a
 ## What it includes
 
 - **Chat completions** — streaming and non-streaming.
-- **Fixed tool / function calling** — Flattens to the subset `fm serve` accepts (nested parameters are losslessly round-tripped as JSON). Accepts standard OpenAI `tools`, including rich nested schemas.
-- **Fixed token counts** — `fm serve` reports `prompt_tokens` as `0`; the proxy fills in real token counts so context window gauges work.
+- **Fixed tool / function calling** — Accepts standard OpenAI `tools`, including rich nested schemas. As of macOS 27 Beta 3, `fm serve` decodes nested objects and arrays-of-objects natively; the proxy only falls back to a lossless JSON-string round-trip for the two shapes still verified broken (`array<array<object>>`, and a chain of 3+ directly-nested objects).
+- **Fixed structured output** — `response_format: {type:"json_schema",...}` works with plain, undecorated OpenAI/pydantic-style schemas (including `$defs`/`$ref`, the shape virtually every real schema generator emits). `fm serve` requires its own `title`/`x-order`/`required`/`additionalProperties` dialect on every object schema reached through `$defs`; the proxy injects it automatically so ordinary client schemas just work.
+- **Fixed token counts** — `fm serve`'s non-streaming responses now report real `prompt_tokens` (fixed in Beta 3) and are passed through untouched. Streaming responses only get real usage when the request opts in via `stream_options.include_usage:true`, which real clients rarely set, so the proxy forces that flag upstream on every streaming request and relays fm serve's own real usage back — falling back to a computed estimate only if an upstream ignores the flag entirely.
+- **Throughput counter** — every completion logs a one-line `[toks]` report (`out=… dur=… ttft=… => N.N tok/s`). Not gated behind `--verbose`, so it shows in quiet mode; this is the per-request generation-speed counter.
 - **Added vision support** — standard `image_url` content parts with base64 data URLs.
 - **Enabled CORS** — Browser-based clients can connect directly.
 - **OpenAI-shaped errors** — failures come back typed (`rate_limit_exceeded`, `service_unavailable`) so clients can branch on the cause. A mid-stream safety filter abort ends the completion as `finish_reason:"content_filter"` with any partial output preserved (no exception thrown).
@@ -22,7 +24,7 @@ Includes the native `GET /v1/models` and `GET /health` endpoints as straight pas
 
 ## Requirements
 
-- **macOS 27.0** (ships with `fm` CLI baked in).
+- **macOS 27.0 Beta 3 or later** (fm/FoundationModels **2.0.59+**; ships with `fm` CLI baked in). Several fixes in this release depend on Beta 3 behavior — earlier betas (2.0.55.1.402 and below) have the old, more limited `fm serve`: nested tool params and nested `response_format` schemas will fail, `tool_choice:"required"` won't crash quite the same way, and non-streaming `prompt_tokens` will read back as `0`. Check your build with `otool -l /usr/bin/fm | grep -A2 LC_SOURCE_VERSION` (see `AGENTS.md` for the full fingerprinting recipe).
 - **Signed in with your Apple Account** and Apple Intelligence enabled.
   - The `pcc` model runs on Private Cloud Compute and needs that you to be signed in.
   - The `system` model is available locally.
@@ -88,7 +90,7 @@ Run `fm serve` in its own terminal, in the foreground. Backgrounding it (or runn
 
 ```bash
 ./fm-launch.sh [options]
-  -v, --verbose          show the proxy's per-request [assembled] telemetry (errors/warnings are always shown, even without this)
+  -v, --verbose          show the proxy's per-request [assembled] telemetry (errors/warnings and the [toks] throughput counter are always shown, even without this)
   --fm-port <n>          fm serve port          (default 1976)
   --proxy-port <n>       proxy port clients use (default 1977)
   --fm-bin <path>        fm binary              (default /usr/bin/fm)
@@ -116,7 +118,7 @@ Exactly what triggers each is **unverified**. Apple's error messaging is generic
 
 Because `fm serve` is **part of macOS 27.0 beta**, its request/response behavior, schema support, and error semantics may change between builds. Which can change how this proxy works. Expect to update the proxy as the betas evolve.
 
-**Known limits**: nested structured output is approximated rather than strictly enforced; `n > 1` isn't supported; sampling parameters are passed through as-is.
+**Known limits**: two rare nested tool-param shapes (`array<array<object>>`, and a chain of 3+ directly-nested objects) still can't be decoded natively and fall back to a JSON-string round-trip; `n > 1` isn't supported; `parallel_tool_calls: false` is accepted but silently ignored by `fm serve` (the proxy passes every `tool_call` through rather than guessing which one to keep — see `AGENTS.md`); sampling parameters are passed through as-is. `fm serve` also 400s any tool-calling request where a tool is missing `function.description` — the proxy backfills a missing/null description to `""` so this is transparent to clients.
 
 See [`AGENTS.md`](AGENTS.md) for the deeper technical notes (schema flattening,
 token accounting, the PCC context ceiling, and the structured-output situation).
