@@ -101,25 +101,39 @@ function splitMessages(messages) {
 // keyed cache turns those repeats into free lookups. Bounded to keep memory flat.
 const _tokenCache = new Map();
 const _TOKEN_CACHE_MAX = 512;
+// macOS 27 Beta 4 (fm 2.0.62) renamed `fm token-count` to `fm count-tokens` — the
+// old name hard-errors. Probe the new name first, fall back to the old one (Beta 3
+// compat), and remember whichever this build accepts so every later call spawns
+// `fm` exactly once.
+const _TOKEN_SUBCOMMANDS = ["count-tokens", "token-count"];
+let _tokenSubcommand = null;
 function fmTokenCount(text, instructions) {
-  // fm token-count requires at least one input; skip the call entirely when both
-  // are empty (e.g. tool-only turns) — the count is just the per-turn overhead.
+  // The count subcommand requires at least one input; skip the call entirely when
+  // both are empty (e.g. tool-only turns) — the count is just the per-turn overhead.
   if (!text && !instructions) return PER_TURN_OVERHEAD;
   const key = (instructions || "") + "\0" + (text || "");
   if (_tokenCache.has(key)) return _tokenCache.get(key);
   let result = null;
-  try {
-    const args = ["token-count", "-q"];
-    if (instructions) args.push("-i", instructions);
-    const out = execFileSync("/usr/bin/fm", args, {
-      input: text || "",
-      encoding: "utf8",
-      timeout: 5000,
-    });
-    const n = parseInt(out.trim(), 10);
-    result = Number.isFinite(n) ? n : null;
-  } catch {
-    result = null;
+  const candidates = _tokenSubcommand ? [_tokenSubcommand] : _TOKEN_SUBCOMMANDS;
+  for (const sub of candidates) {
+    try {
+      const args = [sub, "-q"];
+      if (instructions) args.push("-i", instructions);
+      const out = execFileSync("/usr/bin/fm", args, {
+        input: text || "",
+        encoding: "utf8",
+        timeout: 5000,
+      });
+      const n = parseInt(out.trim(), 10);
+      if (Number.isFinite(n)) {
+        result = n;
+        _tokenSubcommand = sub;
+        break;
+      }
+    } catch {
+      // try the next name; leave _tokenSubcommand unset so a transient failure
+      // (e.g. missing binary) re-probes rather than pinning a bad name
+    }
   }
   // Cache only successful counts; a null is a transient failure worth retrying.
   if (result != null) {
@@ -305,30 +319,27 @@ function leafIsObjectThroughArrays(prop) {
   return prop.type === "object" || !!prop.properties;
 }
 
-// A top-level param needs the JSON-string round-trip only for the two shapes
-// verified live against fm serve (Beta 3 / fm 2.0.59) to still be broken even
-// after the duplicateType fix (see header comment):
-//   1. An object reachable through 2+ consecutive array wrappers
-//      (array<array<object>> and deeper) — the model silently omits the
-//      argument. array<array<number>> (a primitive leaf) is fine.
-//   2. A chain of 3+ directly-nested object types (object -> object -> object)
-//      — the model leaks its internal `$defs` registration into the argument
-//      instead of the real shape. 2 levels (object -> object) is fine, and an
-//      intervening array resets the chain (object -> array -> object is fine).
-// Everything else (flat schemas, one level of object nesting, array<object>,
-// object -> array -> object) decodes natively and must NOT be round-tripped.
-function needsJsonRoundTrip(prop, arrayRun = 0, objectChain = 0) {
+// A top-level param needs the JSON-string round-trip only for the ONE shape
+// verified live against fm serve (Beta 4 / fm 2.0.62) to still be broken:
+//   An object reachable through 2+ consecutive array wrappers
+//   (array<array<object>> and deeper) — Beta 4 errors with
+//   "Failed to parse generated content" (Beta 3 silently omitted the
+//   argument). array<array<number>> (a primitive leaf) is fine.
+// Chains of 3+ directly-nested object types leaked internal `$defs` naming on
+// Beta 3 and were round-tripped then; Beta 4 decodes them correctly (verified
+// live, repeated trials, system + pcc, incl. a 4-level chain) so object
+// nesting to any depth now passes through natively and must NOT be
+// round-tripped.
+function needsJsonRoundTrip(prop, arrayRun = 0) {
   if (!prop || typeof prop !== "object") return false;
   if (prop.type === "array") {
     const run = arrayRun + 1;
     if (run >= 2 && leafIsObjectThroughArrays(prop.items)) return true;
-    return needsJsonRoundTrip(prop.items, run, 0);
+    return needsJsonRoundTrip(prop.items, run);
   }
   if (prop.type === "object" || prop.properties) {
-    const chain = objectChain + 1;
-    if (chain > 2) return true;
     return Object.values(prop.properties || {}).some((sub) =>
-      needsJsonRoundTrip(sub, 0, chain));
+      needsJsonRoundTrip(sub, 0));
   }
   return false;
 }
@@ -350,9 +361,13 @@ function fixToolSchema(schema) {
       const shape = JSON.stringify(prop, (k, v) =>
         EMBED_STRIP_KEYS.has(k) ? undefined : v);
       const desc = prop.description ? prop.description + " " : "";
+      // "must be a quoted JSON string, not raw JSON" is load-bearing: Beta 4's
+      // parser deterministically 500s ("Failed to parse generated content") when
+      // the model emits raw JSON in a string slot, and the old "JSON string
+      // matching:" phrasing reliably provoked exactly that. Verified live 4/4.
       result.properties[name] = {
         type: "string",
-        description: `${desc}JSON string matching: ${shape}`,
+        description: `${desc}A JSON-encoded string value (must be a quoted JSON string, not raw JSON) matching: ${shape}`,
       };
     } else {
       result.properties[name] = simplifyProperty(prop);
@@ -471,7 +486,16 @@ function expandToolCallArguments(toolName, argsStr, coercion) {
     let changed = false;
     for (const f of fields) {
       if (typeof obj[f] === "string") {
-        try { obj[f] = JSON.parse(obj[f]); changed = true; } catch { /* leave */ }
+        try { obj[f] = JSON.parse(obj[f]); changed = true; } catch {
+          // Beta 4 model quirk (seen live): HTML entities (&quot; etc.) in place
+          // of escaped quotes inside the round-tripped JSON string. One-shot
+          // entity decode, then retry; still-unparseable values are left as-is.
+          const decoded = obj[f]
+            .replace(/&quot;/g, '"').replace(/&#34;/g, '"')
+            .replace(/&apos;/g, "'").replace(/&#39;/g, "'")
+            .replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&amp;/g, "&");
+          try { obj[f] = JSON.parse(decoded); changed = true; } catch { /* leave */ }
+        }
       }
     }
     return changed ? JSON.stringify(obj) : argsStr;
@@ -520,6 +544,13 @@ function classifyError(msg, parsedReq) {
   // just wastes ~15s. Distinct from a transient capacity 503.
   if (m.includes("not available in this context") || m.includes("service_unavailable"))
     return { type: "service_unavailable", code: "model_unavailable", retry: false, label: "MODEL UNAVAILABLE (PCC attribution)" };
+  // Beta 4's stricter tool-call parser rejects malformed generated arguments with
+  // this message. Deterministic for a given request (verified live, 5/5 identical
+  // failures — e.g. a model emitting raw JSON where the schema says string), so
+  // retrying just burned the full ~35s backoff ladder. Typed server_error: the
+  // failure is the model/decoder's, not the client's.
+  if (m.includes("failed to parse generated content"))
+    return { type: "server_error", code: "generation_parse_failed", retry: false, label: "GENERATION PARSE FAILED" };
   if (m.includes("languagemodelerror") || m.includes("error -1") || m.includes("rate limit") || m.includes("rate_limit")) {
     // Beta 3 bug (verified live): tool_choice:"required" (or a forced function) crashes
     // fm serve's `system` engine with this EXACT signature — deterministic and
@@ -545,7 +576,7 @@ function errorFrame(cls, msg) {
 
 // Exported for tests when required as a module; harmless when run directly.
 if (require.main !== module) {
-  module.exports = { fixTools, fixToolSchema, fixResponseFormatSchema, expandToolCallArguments, classifyError, errorFrame };
+  module.exports = { fixTools, fixToolSchema, fixResponseFormatSchema, expandToolCallArguments, classifyError, errorFrame, fmTokenCount };
 }
 
 // CORS so browser-based OpenAI clients (open-webui, web apps hitting the base URL

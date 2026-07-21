@@ -26,13 +26,13 @@ version is on disk, so regenerate rather than hand-editing.
 `fm --version` does **not** exist (errors "Unknown option"). To detect when Apple ships a
 new `fm`/FoundationModels build across macOS betas, fingerprint the binary:
 
-| What | How | Beta 2 value | Beta 3 value |
-|---|---|---|---|
-| fm source version | `otool -l /usr/bin/fm \| grep -A2 LC_SOURCE_VERSION` | `2.0.55.1.402` | `2.0.59` |
-| Framework version | `plutil -p /System/Library/Frameworks/FoundationModels.framework/Resources/Info.plist \| grep CFBundleVersion` | `2.0.55.1.402` | `2.0.59` |
-| Runtime version | `codesign -dvvv /usr/bin/fm` → `Runtime Version=` | `27.0.0` | `27.0.0` |
-| Rebuild date | `ls -la /usr/bin/fm` (mtime) | Jun 19 2026 | Jul 3 2026 |
-| macOS build | `sw_vers` → `BuildVersion` | `26A5368g` (27.0 Beta 2) | `26A5378j` (27.0 Beta 3) |
+| What | How | Beta 2 value | Beta 3 value | Beta 4 value |
+|---|---|---|---|---|
+| fm source version | `otool -l /usr/bin/fm \| grep -A2 LC_SOURCE_VERSION` | `2.0.55.1.402` | `2.0.59` | `2.0.62.1.402` |
+| Framework version | `plutil -p /System/Library/Frameworks/FoundationModels.framework/Resources/Info.plist \| grep CFBundleVersion` | `2.0.55.1.402` | `2.0.59` | `2.0.62.1.402` |
+| Runtime version | `codesign -dvvv /usr/bin/fm` → `Runtime Version=` | `27.0.0` | `27.0.0` | `27.0.0` |
+| Rebuild date | `ls -la /usr/bin/fm` (mtime) | Jun 19 2026 | Jul 3 2026 | Jul 17 2026 |
+| macOS build | `sw_vers` → `BuildVersion` | `26A5368g` (27.0 Beta 2) | `26A5378j` (27.0 Beta 3) | `26A5388g` (27.0 Beta 4) |
 
 Audit recipe after any OS update:
 1. **Structure** — `python3 tools/gen-fm-docs.py --outdir /tmp/fmnew` then
@@ -61,6 +61,41 @@ Audit recipe after any OS update:
      sends no `usage` at all — unchanged, still needs the proxy's fill-in.
    - on-device `system` model actually running inference — healthy again in Beta 3 (Beta 2
      was flaky right after update — see Known limits).
+
+Beta 4 (26A5388g, fm 2.0.62.1.402) audit results, 2026-07-21:
+- **`fm token-count` renamed `fm count-tokens`** — the old name hard-errors
+  (`Unknown command`). `fm-proxy.js`'s `fmTokenCount` probes `count-tokens` first and
+  falls back to `token-count` (Beta 3 compat), remembering whichever works.
+- `--load-transcript` renamed `--resume`; new repeatable `--tool` flag on
+  `respond`/`count-tokens` enabling built-in `barcode` and `ocr` tools, with `--label`
+  to name `--image` inputs.
+- **PCC attribution tightened: Terminal.app specifically, not just any foreground TTY**
+  (see the runbook note below). Foreground panes in other terminal hosts (herdr) that
+  worked on Beta 3 are now refused; the error says "Please use the Terminal app."
+- **3+-chained-object tool params FIXED** (was a `$defs`-leak, round-tripped since
+  Beta 3) — verified 5/5 on `system` + `pcc`, incl. a 4-level chain. The round-trip now
+  triggers ONLY for `array<array<object>>`.
+- **`array<array<object>>` failure mode changed**: native now hard-errors
+  `500 "Failed to parse generated content."` (Beta 3 silently omitted the argument).
+  The old round-trip prose ("JSON string matching:") deterministically provoked the
+  SAME 500 (model emits raw JSON in the string slot; Beta 4's parser rejects it) — the
+  prose now demands "a quoted JSON string, not raw JSON", which is mechanically
+  reliable (4/4) though content quality for this shape remains a model limitation
+  (e.g. HTML-entity-mangled quotes, which `expandToolCallArguments` now decodes).
+- New `classifyError` branch: `"Failed to parse generated content"` is deterministic
+  (5/5) → `server_error`/`generation_parse_failed`, `retry:false` (was retrying the
+  full ~35s backoff ladder).
+- **Chat template overhead grew ~150 tokens**: the same one-line message that framed
+  to 57 `prompt_tokens` on Beta 3 frames to ~208 on Beta 4 (system and pcc alike).
+  Tokenizer itself unchanged (`count-tokens` values identical). Budget accordingly
+  against the ~32k PCC ceiling.
+- **PCC now reports real prompt caching** — `prompt_tokens_details.cached_tokens` is
+  non-zero on repeat prompts (was always 0). Pure passthrough; nothing to fix.
+- Unchanged from Beta 3 (all reverified live): `tool_choice:"required"` still crashes
+  `system` (pcc fine); missing `function.description` still 400s; `response_format`
+  `$defs` dialect still required (error now names the offending path); streaming usage
+  still requires `stream_options.include_usage:true` (proxy still forces it);
+  `parallel_tool_calls` still ignored; CORS preflight-yes/request-403 split unchanged.
 
 ## Tool calling with Pi (PCC + rich schemas) — runbook
 
@@ -95,28 +130,30 @@ before forwarding, so client-supplied no-description tools (common for simple
 no-argument actions) work transparently instead of erroring.
 
 **Nested objects and array-of-objects decode natively as of macOS 27 Beta 3 (fm
-2.0.59).** The `GenerationSchema duplicateType` bug that used to force every nested
-object through a JSON-string round-trip is fixed — verified live against a real
-`fm serve`: one level of object nesting, array<object> (e.g. Pi's `edit` tool with
-`edits: [{oldText, newText}]`), object-in-object (chain depth 2), and
-object → array → object all decode correctly with no round-trip. Two shapes are
+2.0.59), and object chains of ANY depth as of Beta 4 (fm 2.0.62).** The
+`GenerationSchema duplicateType` bug that used to force every nested object through
+a JSON-string round-trip is fixed, and Beta 4 also fixed the 3+-chained-object
+`$defs` leak (verified live 5/5, system + pcc, incl. a 4-level chain). ONE shape is
 **still broken**, verified live and narrowly detected by `needsJsonRoundTrip`:
 - `array<array<object>>` (an object reached through 2+ consecutive array wrappers)
-  — the model silently omits the argument. `array<array<number>>` is fine.
-- A chain of 3+ directly-nested object types (object → object → object) — the
-  model leaks its internal `$defs` registration into the argument. 2 levels is
-  fine, and an intervening array resets the chain.
+  — Beta 4 hard-errors `500 "Failed to parse generated content."` (Beta 3 silently
+  omitted the argument). `array<array<number>>` (primitive leaf) is fine.
 
-Only those two residual shapes still use the lossless JSON-string round-trip: the
-param is declared to fm as a `type:"string"` whose description says "… JSON string
-matching: {schema}", the model returns JSON in that string, and the proxy re-parses
-it back into the real object/array in the tool_call's `arguments` before forwarding
-to Pi. The embedded schema is stripped of decorative keys fm ignores (`description`
+Only that residual shape still uses the JSON-string round-trip: the param is
+declared to fm as a `type:"string"` whose description says "… A JSON-encoded string
+value (must be a quoted JSON string, not raw JSON) matching: {schema}" — the
+"quoted, not raw" wording is load-bearing on Beta 4, whose parser rejects raw JSON
+in a string slot (the old phrasing deterministically provoked that) — the model
+returns JSON in that string, and the proxy re-parses it back into the real
+object/array in the tool_call's `arguments` before forwarding to Pi (including a
+one-shot HTML-entity decode for the model's occasional `&quot;`-mangled output).
+Content quality for this exotic shape is best-effort — a model limitation
+regardless of encoding, not a proxy bug. The embedded schema is stripped of decorative keys fm ignores (`description`
 on nested fields, `title`, `examples`, `default`, `$id`, …) before serialization —
 pure token savings with no loss of shape. See `EMBED_STRIP_KEYS` / `STRIP_KEYS` /
 `needsJsonRoundTrip` in `fm-proxy.js`.
 
-### Start it (from a Terminal signed into Apple Intelligence — PCC needs the attribution)
+### Start it (from Terminal.app signed into Apple Intelligence — PCC needs the attribution)
 
 **One command (recommended):** `fm-launch.sh` starts the proxy (backgrounded), then runs
 `fm serve` in the **foreground** (it blocks the terminal). It prints `stack up …` once
@@ -127,15 +164,19 @@ fm serve is healthy:
 ./fm-launch.sh --verbose  # also shows the proxy's per-request [assembled] telemetry
 ```
 
-> **fm serve must run in the foreground.** macOS only grants PCC attribution to a
-> **foreground, TTY-attached** `fm serve`. Backgrounding it — the old node launcher
-> (`zsh → node → fm`), or a shell `&` — makes every `pcc` request fail with
-> `ModelManagerError 1013` / `"not available in this context"` (HTTP 503) while `system`
-> keeps working. A bash intermediary is fine; **foreground vs backgrounded is the
-> decisive line** (probed exhaustively — see memory `launcher-breaks-pcc-attribution`).
-> So the launcher foregrounds `fm serve` and backgrounds the proxy (which only forwards,
-> no PCC needed). `fm available` is a one-shot that keeps PCC in every context, so it's a
-> poor predictor of `fm serve`'s attribution — don't use it to validate a launcher.
+> **fm serve must run in the foreground, and as of Beta 4, inside Terminal.app
+> specifically.** On Beta 3, any foreground TTY-attached `fm serve` (including panes in
+> other terminal hosts like herdr) got PCC attribution. **Beta 4 tightened this**: the
+> same foreground pane in a non-Terminal host is refused with `"Private Cloud Compute
+> is not available in this context. Please use the Terminal app."` (HTTP 503) while a
+> `fm serve` launched inside real Terminal.app works (verified live, both directions,
+> same build). Backgrounding — the old node launcher (`zsh → node → fm`), or a shell
+> `&` — still strips attribution too, even from Terminal.app. `system` keeps working in
+> every context. See memory `launcher-breaks-pcc-attribution`.
+> So: run the launcher in a Terminal.app window; it foregrounds `fm serve` and
+> backgrounds the proxy (which only forwards, no PCC needed). `fm available` is a
+> one-shot that keeps PCC in every context, so it's a poor predictor of `fm serve`'s
+> attribution — don't use it to validate a launcher.
 
 Use **Ctrl-C to stop** — the trap on INT/TERM/HUP/EXIT reaps the proxy. Do **not**
 Ctrl-Z: a suspended foreground `fm serve` isn't reaped and will strand the port
@@ -215,11 +256,11 @@ The proxy is a drop-in OpenAI endpoint — point any OpenAI client at it and go:
 
 ### Known limits
 
-- Tool-parameter **nested** schemas decode natively as of Beta 3, except two shapes
-  still verified broken — `array<array<object>>` and a chain of 3+ directly-nested
-  objects — which still fall back to a JSON-string round-trip (see "Nested params"
-  above). `response_format` nested schemas are untouched by the proxy (forwarded
-  as-is) — see "Structured output" below for their own dialect requirements.
+- Tool-parameter **nested** schemas decode natively as of Beta 3 (any object-chain
+  depth as of Beta 4), except `array<array<object>>` — still broken upstream
+  (Beta 4: hard `500 "Failed to parse generated content."`) and still round-tripped,
+  best-effort (see "Nested params" above). `response_format` nested schemas get
+  `$defs` dialect injection only — see "Structured output" below.
 - `n > 1` (multiple choices) is not honored — fm serve returns a single completion.
 - `parallel_tool_calls: false` is **not honored** — fm serve accepts the field (200,
   no error) but ignores it entirely. Verified live: identical multi-tool-call responses
@@ -257,10 +298,17 @@ on every streaming request it forwards upstream, regardless of what the client s
 captures fm serve's real final usage-only chunk (`choices:[]` + `usage`), and relays
 it to the client — verified live for both plain-text (`finish_reason:"stop"`) and
 tool-call (`finish_reason:"tool_calls"`) completions, `prompt_tokens`/`completion_tokens`
-both accurate. The old completion-text-based estimate (via `fm token-count`, with a
-`9 + chars/4.4` heuristic fallback) survives only as a fallback for upstreams that
-don't cooperate — e.g. a pre-Beta-3 `fm serve`, or a safety-guardrail abort that never
-reaches a clean finish and so never gets a real usage chunk from fm serve either.
+both accurate. The old completion-text-based estimate (via `fm count-tokens` — renamed
+from `token-count` in Beta 4; the proxy probes both names — with a `9 + chars/4.4`
+heuristic fallback) survives only as a fallback for upstreams that don't cooperate —
+e.g. a pre-Beta-3 `fm serve`, or a safety-guardrail abort that never reaches a clean
+finish and so never gets a real usage chunk from fm serve either.
+
+Note (Beta 4): the chat template's fixed framing grew ~150 tokens — a one-line message
+that assembled to 57 `prompt_tokens` on Beta 3 now assembles to ~208. Passthrough for
+the proxy (fm serve's own numbers), but it shrinks the usable slice of PCC's ~32k
+window, and the `[assembled]` gauge (which counts raw text, not serve's template)
+under-counts by correspondingly more.
 
 The proxy still suppresses the upstream `[DONE]` and re-emits its own final chunk
 either way, so clients reading the last chunk always get *some* usage. The **client's
@@ -349,6 +397,6 @@ end-to-end through the real running proxy.
 "Nested params" above): a two-level nested schema (`$defs`/`$ref`) decodes correctly via
 both `fm respond --schema` and `response_format` over `/v1/chat/completions`, once the
 `$defs` dialect above is present. Not retested: whether `response_format`'s nested
-support has the same residual gaps as the tool path (`array<array<object>>`, 3+ chained
-objects) — if you hit either there, it likely applies here too since both paths share the
-same underlying `GenerationSchema` engine.
+support has the same residual gap as the tool path (`array<array<object>>`; the 3+
+chained-object gap was fixed in Beta 4) — if you hit it there, it likely applies here
+too since both paths share the same underlying `GenerationSchema` engine.

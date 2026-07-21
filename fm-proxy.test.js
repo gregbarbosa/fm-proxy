@@ -4,20 +4,29 @@ const assert = require("node:assert");
 const http = require("node:http");
 const { spawn } = require("node:child_process");
 const path = require("node:path");
-const { fixToolSchema, fixTools, fixResponseFormatSchema, expandToolCallArguments, classifyError, errorFrame } = require("./fm-proxy.js");
+const { fixToolSchema, fixTools, fixResponseFormatSchema, expandToolCallArguments, classifyError, errorFrame, fmTokenCount } = require("./fm-proxy.js");
 
 // fm serve (Beta 3 / fm 2.0.59) fixed the GenerationSchema `duplicateType` bug that
-// used to force EVERY nested object through a JSON-string round-trip. Verified live
-// against a real `fm serve`: flat schemas, one level of object nesting, array<object>,
-// object -> object (chain depth 2), and object -> array -> object all decode correctly
-// and natively now — no round-trip needed. Two shapes are STILL broken (verified live,
-// not assumed — see needsJsonRoundTrip's comment in fm-proxy.js):
+// used to force EVERY nested object through a JSON-string round-trip, and Beta 4
+// (fm 2.0.62) fixed the 3+-chained-object $defs leak. Verified live against a real
+// `fm serve`: flat schemas, object nesting to any chain depth, array<object>, and
+// object -> array -> object all decode correctly and natively now — no round-trip
+// needed. ONE shape is still broken (verified live on Beta 4, not assumed — see
+// needsJsonRoundTrip's comment in fm-proxy.js):
 //   - array<array<object>> (an object reachable through 2+ consecutive array wrappers)
-//     — the model silently omits the argument. array<array<number>> is fine.
-//   - a chain of 3+ directly-nested object types (object -> object -> object) — the
-//     model leaks its internal `$defs` registration into the argument. 2 levels
-//     (object -> object) is fine, and an intervening array resets the chain.
-// Those two residual shapes still use the lossless JSON-string round-trip.
+//     — Beta 4 errors "Failed to parse generated content" (Beta 3 silently omitted
+//     the argument). array<array<number>> (primitive leaf) is fine.
+// That residual shape still uses the lossless JSON-string round-trip.
+
+// ── fm count-tokens (renamed from token-count in Beta 4) ─────────────────────
+// fmTokenCount must return an EXACT tokenizer count, not the chars/4.4 heuristic.
+// "hello world" is exactly 11 tokens per Apple's tokenizer (stable across
+// Beta 1–4); the heuristic would give 9 + ceil(11/4.4) = 12. If the fm CLI
+// subcommand name changes again (Beta 4 renamed token-count → count-tokens) and
+// the probe misses it, this test catches the silent fall-through to null.
+test("fmTokenCount returns the exact tokenizer count via the fm CLI (count-tokens rename)", () => {
+  assert.strictEqual(fmTokenCount("hello world"), 11);
+});
 
 test("single-level nested object param passes through natively (no round-trip)", () => {
   const { schema, jsonFields } = fixToolSchema({
@@ -108,7 +117,9 @@ test("array<array<number>> (primitive leaf) passes through natively — only obj
   assert.strictEqual(schema.properties.grid.items.items.type, "number");
 });
 
-test("a chain of 3 directly-nested objects still needs the JSON-string round-trip", () => {
+test("a chain of 3+ directly-nested objects passes through natively (fixed in Beta 4 / fm 2.0.62)", () => {
+  // Beta 3 leaked internal $defs registration for 3+ chains; Beta 4 decodes them
+  // correctly (verified live 5/5 on system and pcc, incl. a 4-level chain).
   const { schema, jsonFields } = fixToolSchema({
     properties: {
       a: {
@@ -124,8 +135,10 @@ test("a chain of 3 directly-nested objects still needs the JSON-string round-tri
       },
     },
   });
-  assert.deepStrictEqual(jsonFields, ["a"]);
-  assert.strictEqual(schema.properties.a.type, "string");
+  assert.deepStrictEqual(jsonFields, []);
+  assert.strictEqual(schema.properties.a.type, "object");
+  assert.strictEqual(schema.properties.a.properties.b.properties.c.type, "object");
+  assert.strictEqual(schema.properties.a.properties.b.properties.c.properties.val.type, "string");
 });
 
 test("anyOf picks the typed branch, strips the keyword", () => {
@@ -160,6 +173,21 @@ test("required list is preserved for a round-tripped field (array<array<object>>
   assert.strictEqual(schema.properties.grid.type, "string"); // still round-tripped
 });
 
+test("round-trip prose demands a QUOTED JSON string (Beta 4 rejects raw JSON in a string slot)", () => {
+  // Beta 4's parser deterministically 500s ("Failed to parse generated content")
+  // when the model emits raw JSON where the schema says string — which the old
+  // "JSON string matching: {...}" prose reliably provoked. The reworded prose
+  // ("must be a quoted JSON string, not raw JSON") got the model to emit a real
+  // quoted string 4/4 in live trials. Pin the load-bearing phrase.
+  const { schema } = fixToolSchema({
+    properties: {
+      grid: { type: "array", items: { type: "array", items: { type: "object", properties: { x: { type: "number" } } } } },
+    },
+  });
+  assert.match(schema.properties.grid.description, /must be a quoted JSON string, not raw JSON/);
+  assert.match(schema.properties.grid.description, /matching: \{/);
+});
+
 test("required list is preserved through native nested passthrough (object and array<object>)", () => {
   const { schema } = fixToolSchema({
     properties: {
@@ -192,6 +220,19 @@ test("coercion roundtrip: JSON-string args re-expand to objects (residual round-
   }));
   assert.deepStrictEqual(coercion.search, ["grid"]);
   const out = expandToolCallArguments("search", JSON.stringify({ grid: '[[{"x":1}]]' }), coercion);
+  assert.deepStrictEqual(JSON.parse(out), { grid: [[{ x: 1 }]] });
+});
+
+test("coercion roundtrip: HTML-entity-mangled JSON string is decoded then expanded (Beta 4 model quirk)", () => {
+  // Seen live on Beta 4: the model emits &quot; (and friends) inside the
+  // round-tripped JSON string instead of escaped quotes. A plain JSON.parse
+  // fails; a one-shot entity decode recovers the real nested value.
+  const { coercion } = fixTools(JSON.stringify({
+    tools: [{ function: { name: "search", parameters: { properties: {
+      grid: { type: "array", items: { type: "array", items: { type: "object", properties: { x: { type: "number" } } } } },
+    } } } }],
+  }));
+  const out = expandToolCallArguments("search", JSON.stringify({ grid: "[[{&quot;x&quot;:1}]]" }), coercion);
   assert.deepStrictEqual(JSON.parse(out), { grid: [[{ x: 1 }]] });
 });
 
@@ -727,6 +768,18 @@ test("classifyError: model=system WITHOUT a forced tool_choice still classifies 
 
 test("classifyError: called without a parsedReq argument (backward compatible) still classifies as rate-limit", () => {
   assert.strictEqual(classifyError("LanguageModelError -1").type, "rate_limit_exceeded");
+});
+
+test("classifyError: 'Failed to parse generated content' (new in Beta 4) is deterministic — no retry", () => {
+  // Beta 4's stricter tool-call parser rejects malformed generated arguments with
+  // this message. Verified live to be deterministic for a given request (5/5
+  // identical failures) — retrying burned ~35s through the full backoff ladder
+  // before surfacing. Must be terminal, and typed server_error (it is not the
+  // client's fault; the model/decoder failed to produce parseable output).
+  const c = classifyError("Failed to parse generated content.");
+  assert.strictEqual(c.type, "server_error");
+  assert.strictEqual(c.code, "generation_parse_failed");
+  assert.strictEqual(c.retry, false);
 });
 
 test("classifyError: PCC 'not available in this context' is terminal service_unavailable", () => {

@@ -37,8 +37,10 @@ MODEL OPTIONS:
 | `<prompt>` | A prompt for the model to respond to |
 | `--text <text>` | Text segment to include in the prompt |
 | `--image <image>` | Path to an image to include in the prompt |
-| `--load-transcript <load-transcript>` | Path to a saved transcript for conversational context |
-| `--save-transcript <save-transcript>` | Save the session transcript to ~/.fm/sessions/<name> after responding |
+| `--label <label>` | Label for the corresponding --image (repeatable, paired by order). Requires --tool. Defaults to 'image_<index>'. |
+| `--resume <resume>` | Continue an earlier conversation: load a saved transcript so the model picks up with its previous turns as context |
+| `--tool <tool>` | Built-in tool to enable (repeatable). Known: barcode, ocr. |
+| `--save-transcript <save-transcript>` | Save the transcript to a file after responding. An absolute path is used as-is; a bare filename is saved in the current directory. |
 | `-h, --help` | Show help information. |
 
 ## `fm chat`
@@ -59,16 +61,17 @@ Start an interactive multi-turn conversation. Sessions are automatically saved t
 | `--resume, -r <resume>` | Resume a saved chat session |
 | `--continue` | Continue the most recent chat session |
 | `--instructions, -i <instructions>` | Instructions for the model |
+| `--tool <tool>` | Built-in tool to enable (repeatable). Known: barcode, ocr. |
 | `--set-default-model <set-default-model>` | Persist <model> as the default for future fm chat sessions |
 | `-h, --help` | Show help information. |
 
-## `fm token-count`
+## `fm count-tokens`
 
 Count the tokens in a prompt, instructions, or saved transcript.
 
 
 ```
-Count the number of tokens the request would consume using the on-device system model's tokenizer. Supports positional prompts, --text and --image segments, --instructions, and --load-transcript.
+Count the number of tokens the request would consume using the on-device system model's tokenizer. Supports positional prompts, --text and --image segments, --instructions, and --resume.
 
 When stdout is a terminal the output is prefixed with 'Token count: '; when piped or redirected (or when --quiet is passed) only the integer is printed. When no prompt is given on the command line, the prompt is read from standard input if stdin is piped.
 ```
@@ -82,7 +85,8 @@ When stdout is a terminal the output is prefixed with 'Token count: '; when pipe
 | `<prompt>` | A prompt for the model to respond to |
 | `--text <text>` | Text segment to include in the prompt |
 | `--image <image>` | Path to an image to include in the prompt |
-| `--load-transcript <load-transcript>` | Path to a saved transcript for conversational context |
+| `--label <label>` | Label for the corresponding --image (repeatable, paired by order). Requires --tool. Defaults to 'image_<index>'. |
+| `--resume <resume>` | Continue an earlier conversation: load a saved transcript so the model picks up with its previous turns as context |
 | `--quiet, -q` | Print only the integer count (automatic when stdout is piped or redirected) |
 | `-h, --help` | Show help information. |
 
