@@ -71,7 +71,11 @@ Beta 4 (26A5388g, fm 2.0.62.1.402) audit results, 2026-07-21:
   to name `--image` inputs.
 - **PCC attribution tightened: Terminal.app specifically, not just any foreground TTY**
   (see the runbook note below). Foreground panes in other terminal hosts (herdr) that
-  worked on Beta 3 are now refused; the error says "Please use the Terminal app."
+  worked on Beta 3 are now refused; the error says "Please use the Terminal app." Also
+  refused: a plain foreground **Ghostty** tab (not herdr, no daemon in the tree) —
+  user-tested 2026-07-23. That rules out a process-detachment explanation; it's the
+  host app's identity, and only Terminal.app passes. Only Terminal.app was confirmed
+  to grant it (via `osascript … do script`).
 - **3+-chained-object tool params FIXED** (was a `$defs`-leak, round-tripped since
   Beta 3) — verified 5/5 on `system` + `pcc`, incl. a 4-level chain. The round-trip now
   triggers ONLY for `array<array<object>>`.
@@ -166,12 +170,14 @@ fm serve is healthy:
 
 > **fm serve must run in the foreground, and as of Beta 4, inside Terminal.app
 > specifically.** On Beta 3, any foreground TTY-attached `fm serve` (including panes in
-> other terminal hosts like herdr) got PCC attribution. **Beta 4 tightened this**: the
-> same foreground pane in a non-Terminal host is refused with `"Private Cloud Compute
-> is not available in this context. Please use the Terminal app."` (HTTP 503) while a
-> `fm serve` launched inside real Terminal.app works (verified live, both directions,
-> same build). Backgrounding — the old node launcher (`zsh → node → fm`), or a shell
-> `&` — still strips attribution too, even from Terminal.app. `system` keeps working in
+> other terminal hosts like herdr) got PCC attribution. **Beta 4 tightened this**: a
+> foreground `fm serve` in a non-Terminal host is refused with `"Private Cloud Compute
+> is not available in this context. Please use the Terminal app."` (HTTP 503) — verified
+> for both a herdr pane AND a plain foreground **Ghostty** tab (a normal, non-detached
+> process tree — so it's the host app's identity, not process detachment), while a
+> `fm serve` launched inside real Terminal.app works. Backgrounding — the old node
+> launcher (`zsh → node → fm`), or a shell `&` — still strips attribution too, even
+> from Terminal.app. `system` keeps working in
 > every context. See memory `launcher-breaks-pcc-attribution`.
 > So: run the launcher in a Terminal.app window; it foregrounds `fm serve` and
 > backgrounds the proxy (which only forwards, no PCC needed). `fm available` is a
