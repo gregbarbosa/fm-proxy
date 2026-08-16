@@ -348,6 +348,34 @@ Unchanged from Beta 4: PCC still requires Terminal.app (same 503); a missing
   Apple logo character. `--provider $' FM' --model pcc`; a plain `FM/pcc` will
   not match.
 
+### Vision: the two engines encode images differently
+
+The on-device model does **real** image understanding, not OCR. Given a text-free crop
+of a travel poster it described the scene ("people surfing and walking on a sunny beach
+with palm trees and sailboats"), named the sun's colour, and confirmed someone was
+surfing. It miscounted 3 sailboats as 4 — ordinary counting weakness, not blindness.
+
+The token cost differs sharply, and that is the useful part:
+
+| Image | `system` | `pcc` |
+|---|---|---|
+| 699×420, 545 KB | 187 | 303 |
+| 699×1024, 1.3 MB | 187 | — |
+| 1696×2482, 7.5 MB | 187 | 927 |
+
+`system` charges a **flat** cost per image no matter the resolution or file size — 14×
+the pixels costs the same 187 tokens, so roughly 130 tokens for the image on top of a
+~57-token turn. It evidently downsamples to a fixed grid and emits a fixed-size
+embedding. `pcc` scales with resolution instead, so a bigger image buys more detail.
+
+Two practical consequences. Resizing before sending is pointless on `system` and
+counterproductive on `pcc`. And `system`'s fixed budget is why it reads large text
+reliably but miscounts small repeated objects — there is only so much grid.
+
+Unrelated bug: `fm count-tokens --image <path>` fails with
+`ModelManagerServices.ModelManagerError error 1001`, so image token costs have to be
+read from `fm serve`'s `usage` instead of the CLI.
+
 **The 4096-token `system` window is the real constraint for agent clients.** Every
 feature works on the on-device model, but only if the whole request fits in 4096
 tokens. Through the raw API that is easy — a plain turn frames to 57 tokens, and the
