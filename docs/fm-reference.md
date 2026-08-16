@@ -38,9 +38,9 @@ MODEL OPTIONS:
 | `--text <text>` | Text segment to include in the prompt |
 | `--image <image>` | Path to an image to include in the prompt |
 | `--label <label>` | Label for the corresponding --image (repeatable, paired by order). Requires --tool. Defaults to 'image_<index>'. |
-| `--resume <resume>` | Continue an earlier conversation: load a saved transcript so the model picks up with its previous turns as context |
 | `--tool <tool>` | Built-in tool to enable (repeatable). Known: barcode, ocr. |
 | `--save-transcript <save-transcript>` | Save the transcript to a file after responding. An absolute path is used as-is; a bare filename is saved in the current directory. |
+| `--resume <resume>` | Continue an earlier conversation: load a saved transcript so the model picks up with its previous turns as context |
 | `-h, --help` | Show help information. |
 
 ## `fm chat`
@@ -67,11 +67,13 @@ Start an interactive multi-turn conversation. Sessions are automatically saved t
 
 ## `fm count-tokens`
 
-Count the tokens in a prompt, instructions, or saved transcript.
+Count the tokens in a prompt, instructions, or transcript.
 
 
 ```
-Count the number of tokens the request would consume using the on-device system model's tokenizer. Supports positional prompts, --text and --image segments, --instructions, and --resume.
+Count the number of tokens using the on-device system model's tokenizer. Supports positional prompts, --text and --image segments, --instructions, and a saved --transcript.
+
+A bare prompt is counted as raw content on its own. Add --instructions or --transcript to instead count the framed request the model actually receives, including the chat-template turn markers the model injects around it.
 
 When stdout is a terminal the output is prefixed with 'Token count: '; when piped or redirected (or when --quiet is passed) only the integer is printed. When no prompt is given on the command line, the prompt is read from standard input if stdin is piped.
 ```
@@ -86,8 +88,8 @@ When stdout is a terminal the output is prefixed with 'Token count: '; when pipe
 | `--text <text>` | Text segment to include in the prompt |
 | `--image <image>` | Path to an image to include in the prompt |
 | `--label <label>` | Label for the corresponding --image (repeatable, paired by order). Requires --tool. Defaults to 'image_<index>'. |
-| `--resume <resume>` | Continue an earlier conversation: load a saved transcript so the model picks up with its previous turns as context |
 | `--quiet, -q` | Print only the integer count (automatic when stdout is piped or redirected) |
+| `--transcript <transcript>` | Path to a saved transcript to count. Its turns are counted as a framed conversation. |
 | `-h, --help` | Show help information. |
 
 ## `fm schema`
@@ -186,4 +188,22 @@ Fetches the current quota usage for the specified model. If no model is specifie
 | Option | Description |
 |---|---|
 | `--model, -m <model>` | Model to check: system or pcc (default: all) |
+| `-h, --help` | Show help information. |
+
+## `fm license`
+
+Show and agree to the Apple Foundation Models CLI Legal Notice & Terms.
+
+
+```
+Displays the Apple Foundation Models CLI Legal Notice & Terms and asks you to agree to them. Agreeing applies to every user on the machine, so it must be run as a privileged user: run 'sudo fm license'. You are asked once, and again only if the terms change.
+
+Agreement is required to use fm at all, and fm asks for it the first time you run any command. Run this command to agree in advance instead of being prompted.
+```
+
+
+| Option | Description |
+|---|---|
+| `--status` | Report whether the license has been agreed to, without prompting. |
+| `--show` | Print the license text without prompting. |
 | `-h, --help` | Show help information. |
