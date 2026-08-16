@@ -1,3 +1,9 @@
+> **License, as of Beta 5.** `sudo fm license` must be accepted before any `fm`
+> subcommand runs. Its terms include "agreeing to NOT programmatically access or use
+> Apple models through Apple software or services except as expressly permitted".
+> `fm-proxy` does exactly that, so this project conflicts with the terms it accepts.
+> Keep it to local research. The README carries the full warning — do not remove it.
+
 ## Project direction
 
 The **`fm-proxy.js`** path is the primary, supported way to do tool calling + PCC with
@@ -26,13 +32,13 @@ version is on disk, so regenerate rather than hand-editing.
 `fm --version` does **not** exist (errors "Unknown option"). To detect when Apple ships a
 new `fm`/FoundationModels build across macOS betas, fingerprint the binary:
 
-| What | How | Beta 2 value | Beta 3 value | Beta 4 value |
-|---|---|---|---|---|
-| fm source version | `otool -l /usr/bin/fm \| grep -A2 LC_SOURCE_VERSION` | `2.0.55.1.402` | `2.0.59` | `2.0.62.1.402` |
-| Framework version | `plutil -p /System/Library/Frameworks/FoundationModels.framework/Resources/Info.plist \| grep CFBundleVersion` | `2.0.55.1.402` | `2.0.59` | `2.0.62.1.402` |
-| Runtime version | `codesign -dvvv /usr/bin/fm` → `Runtime Version=` | `27.0.0` | `27.0.0` | `27.0.0` |
-| Rebuild date | `ls -la /usr/bin/fm` (mtime) | Jun 19 2026 | Jul 3 2026 | Jul 17 2026 |
-| macOS build | `sw_vers` → `BuildVersion` | `26A5368g` (27.0 Beta 2) | `26A5378j` (27.0 Beta 3) | `26A5388g` (27.0 Beta 4) |
+| What | How | Beta 2 value | Beta 3 value | Beta 4 value | Beta 5 value |
+|---|---|---|---|---|---|
+| fm source version | `otool -l /usr/bin/fm \| grep -A2 LC_SOURCE_VERSION` | `2.0.55.1.402` | `2.0.59` | `2.0.62.1.402` | `2.0.68.1.401` |
+| Framework version | `plutil -p /System/Library/Frameworks/FoundationModels.framework/Resources/Info.plist \| grep CFBundleVersion` | `2.0.55.1.402` | `2.0.59` | `2.0.62.1.402` | `2.0.68.1.401` |
+| Runtime version | `codesign -dvvv /usr/bin/fm` → `Runtime Version=` | `27.0.0` | `27.0.0` | `27.0.0` | `27.0.0` |
+| Rebuild date | `ls -la /usr/bin/fm` (mtime) | Jun 19 2026 | Jul 3 2026 | Jul 17 2026 | Aug 7 2026 |
+| macOS build | `sw_vers` → `BuildVersion` | `26A5368g` (27.0 Beta 2) | `26A5378j` (27.0 Beta 3) | `26A5388g` (27.0 Beta 4) | `26A5406e` (27.0 Beta 5) |
 
 Audit recipe after any OS update:
 1. **Structure** — `python3 tools/gen-fm-docs.py --outdir /tmp/fmnew` then
@@ -259,6 +265,32 @@ The proxy is a drop-in OpenAI endpoint — point any OpenAI client at it and go:
     models or use `tool_choice:"auto"`/omit it to work around this on `system`.
   - `type: "server_error"` (`code: "internal_error"` / `"upstream_unreachable"`) —
     anything else, including the `502` when `fm serve` is down.
+
+### Beta 5 (fm 2.0.68.1.401, build 26A5406e) — what changed
+
+All items verified live against `fm serve` on the `system` engine.
+
+| Area | Change | Proxy response |
+|---|---|---|
+| **License gate** | Every subcommand exits 69 until a privileged user runs `sudo fm license`. Machine-wide, needs a TTY. Blocks `--help` and `--experimental-dump-help` too, so `tools/gen-fm-docs.py` cannot run until it is accepted. | Latch on first sight, warn once, fall back to estimates. Re-probing per count would spawn `fm` twice per message and echo the banner each time. |
+| **`stream` default** | A chat request that **omits** `stream` now returns `text/event-stream`. Only an explicit `stream:false` returns JSON. Breaks every OpenAI SDK that omits the field. | Send an explicit `stream:false` upstream when the client did not ask to stream. |
+| **`count-tokens` modes** | A bare prompt counts raw tokens only ("hello world" = 3, was 11). With `-i` it matches `fm serve`'s `prompt_tokens` **exactly** (0 diff at instruction lengths 11–300). Without `-i` it sits a flat **54** low (measured at prompt lengths 6–400). | `countPromptTokens` adds `CONVERSATION_FRAMING` (54) only when there is no system message. |
+| **Forced `tool_choice`** | The `system` engine now rejects it with a clean 500 `"An unsupported generation guide was used."` in ~140 ms, instead of Beta 3/4's `LanguageModelError -1`. | New non-retryable `classifyError` branch. The new wording matched nothing, so it fell through to the retryable default and burned the whole backoff ladder. |
+| **Tool calling** | **Broken upstream.** `tool_calls` is always `null`, `finish_reason:"stop"`, and raw control tokens leak into content (`"<ctrl46>get_time<ctrl46>"`). The model emits the call; `fm serve`'s parser does not read it. Reproduced direct and through the proxy, streaming and non-streaming. | None possible. Documented in the README. |
+| **String `title`** | A string property carrying `title` is now a "named string type" and 400s with `"Named string types must have a non-empty enum field"`. Object `title` is still fine. | None needed — `decorateDialect` only titles object schemas, never strings. |
+
+Unchanged from Beta 4: PCC still requires Terminal.app (same 503); a missing
+`tool.description` still 400s the whole request; `$defs` still needs `x-order`
+injection (verified: raw `$defs` 400s with `Key 'x-order' not found`); streaming
+usage still arrives via `stream_options.include_usage`.
+
+> **Testing caution.** The on-device model drops out intermittently under repeated
+> load with `com.apple.SensitiveContentAnalysisML error 15` or
+> `LanguageModelError error -1`, and sometimes just hangs. These are transient and
+> must never be read as a verdict about a feature. Re-run a control case that is
+> known to pass before you trust any negative result. An early Beta 5 run wrongly
+> suggested that object `title` caused a hang; a paced re-run with retries showed it
+> passes. Pace requests and retry only the transient failures.
 
 ### Known limits
 
