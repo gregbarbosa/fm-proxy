@@ -4,7 +4,7 @@ const assert = require("node:assert");
 const http = require("node:http");
 const { spawn } = require("node:child_process");
 const path = require("node:path");
-const { fixToolSchema, fixTools, fixResponseFormatSchema, expandToolCallArguments, classifyError, errorFrame, fmTokenCount } = require("./fm-proxy.js");
+const { fixToolSchema, fixTools, fixResponseFormatSchema, expandToolCallArguments, classifyError, errorFrame, fmTokenCount, _isLicenseGate } = require("./fm-proxy.js");
 
 // fm serve (Beta 3 / fm 2.0.59) fixed the GenerationSchema `duplicateType` bug that
 // used to force EVERY nested object through a JSON-string round-trip, and Beta 4
@@ -20,12 +20,42 @@ const { fixToolSchema, fixTools, fixResponseFormatSchema, expandToolCallArgument
 
 // ── fm count-tokens (renamed from token-count in Beta 4) ─────────────────────
 // fmTokenCount must return an EXACT tokenizer count, not the chars/4.4 heuristic.
-// "hello world" is exactly 11 tokens per Apple's tokenizer (stable across
-// Beta 1–4); the heuristic would give 9 + ceil(11/4.4) = 12. If the fm CLI
-// subcommand name changes again (Beta 4 renamed token-count → count-tokens) and
-// the probe misses it, this test catches the silent fall-through to null.
-test("fmTokenCount returns the exact tokenizer count via the fm CLI (count-tokens rename)", () => {
-  assert.strictEqual(fmTokenCount("hello world"), 11);
+// Beta 5 (fm 2.0.68) split the two counting modes apart: a BARE prompt now counts
+// raw prompt tokens only ("hello world" = 3, was 11 through Beta 4), while passing
+// instructions applies fm serve's full conversation framing. Both numbers are
+// pinned here — if the subcommand name or the framing semantics move again, this
+// catches it instead of letting the gauge drift silently.
+// Skipped automatically when Beta 5's legal-notice gate is active — the count is
+// unobtainable then, and the fallback is covered by the gate tests below.
+test("fmTokenCount returns the exact tokenizer count via the fm CLI (count-tokens rename)", (t) => {
+  const bare = fmTokenCount("hello world");
+  if (bare === null) return t.skip("`fm` unavailable (run `sudo fm license`)");
+  assert.strictEqual(bare, 3, "bare prompt = raw tokens only as of Beta 5");
+
+  // With instructions the CLI matches fm serve's prompt_tokens exactly (verified
+  // live at 0 diff), which is why countPromptTokens only adds framing without them.
+  const framed = fmTokenCount("hello world", "You are a helpful assistant");
+  assert.strictEqual(framed, 63);
+  assert.ok(framed - bare > 50, "instructions must pull in the conversation framing");
+});
+
+// ── Beta 5 legal-notice gate ─────────────────────────────────────────────────
+// macOS 27 Beta 5 (fm 2.0.68) gates every subcommand behind `sudo fm license`,
+// exiting 69 with a banner on stderr. That is permanent, not transient, so the
+// proxy must latch it rather than re-probe both subcommand names per count.
+test("_isLicenseGate recognises the Beta 5 gate (exit 69 + banner)", () => {
+  assert.strictEqual(
+    _isLicenseGate({ status: 69, stderr: "YOU HAVE NOT AGREED TO THE APPLE FOUNDATION MODELS CLI LEGAL NOTICE & TERMS.\n" }),
+    true,
+  );
+});
+
+test("_isLicenseGate does not latch on unrelated failures", () => {
+  // A missing binary, a timeout, or an unknown subcommand must stay retryable.
+  assert.strictEqual(_isLicenseGate({ status: 64, stderr: "Unknown subcommand 'token-count'" }), false);
+  assert.strictEqual(_isLicenseGate({ status: 69, stderr: "some other unavailability" }), false);
+  assert.strictEqual(_isLicenseGate({ code: "ENOENT" }), false);
+  assert.strictEqual(_isLicenseGate(undefined), false);
 });
 
 test("single-level nested object param passes through natively (no round-trip)", () => {
@@ -744,6 +774,17 @@ test("classifyError: LanguageModelError -1 is a retryable rate-limit", () => {
 test("classifyError: tool_choice:required on model=system reclassifies as a permanent, non-retryable bug", () => {
   const c = classifyError("LanguageModelError -1", { model: "system", tool_choice: "required" });
   assert.strictEqual(c.type, "invalid_request_error");
+  assert.strictEqual(c.retry, false);
+});
+
+// Beta 5 re-worded the same crash to "An unsupported generation guide was used."
+// That wording matches no other branch, so before it was handled it fell through to
+// the retryable default and burned the whole backoff ladder. It is terminal, and —
+// unlike the Beta 3/4 signature — it needs no request context to be recognised.
+test("classifyError: Beta 5's 'unsupported generation guide' is terminal without request context", () => {
+  const c = classifyError("An unsupported generation guide was used.");
+  assert.strictEqual(c.type, "invalid_request_error");
+  assert.strictEqual(c.code, "tool_choice_unsupported");
   assert.strictEqual(c.retry, false);
 });
 

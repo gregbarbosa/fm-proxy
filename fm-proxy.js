@@ -67,6 +67,10 @@ const RETRY_CAP_MS = Number(process.env.FM_RETRY_CAP_MS ?? 15000);
 //   per-turn chat-template overhead ≈ 9 tokens; content ≈ chars / 4.4.
 const PER_TURN_OVERHEAD = 9;
 const CHARS_PER_TOKEN = 4.4;
+// Beta 5 (fm 2.0.68) framing constant: the fixed cost fm serve adds around a whole
+// conversation, which `fm count-tokens` only includes when -i is passed. Measured
+// as a flat 54 across prompt lengths 6–400 chars. See countPromptTokens.
+const CONVERSATION_FRAMING = 54;
 
 function estimateTokens(text) {
   if (!text) return 0;
@@ -107,12 +111,23 @@ const _TOKEN_CACHE_MAX = 512;
 // `fm` exactly once.
 const _TOKEN_SUBCOMMANDS = ["count-tokens", "token-count"];
 let _tokenSubcommand = null;
+// macOS 27 Beta 5 (fm 2.0.68) added a machine-wide legal-notice gate: until a
+// privileged user runs `sudo fm license`, every subcommand exits 69 and prints a
+// banner to stderr. That failure is permanent, not transient, so retrying it once
+// per count would spawn `fm` twice per message and echo the banner each time.
+// Latch it on first sight, warn once, and fall back to the heuristic from then on.
+let _fmLicenseGated = false;
+function _isLicenseGate(err) {
+  const text = String(err?.stderr || "") + String(err?.stdout || "");
+  return err?.status === 69 && /LEGAL NOTICE & TERMS/.test(text);
+}
 function fmTokenCount(text, instructions) {
   // The count subcommand requires at least one input; skip the call entirely when
   // both are empty (e.g. tool-only turns) — the count is just the per-turn overhead.
   if (!text && !instructions) return PER_TURN_OVERHEAD;
   const key = (instructions || "") + "\0" + (text || "");
   if (_tokenCache.has(key)) return _tokenCache.get(key);
+  if (_fmLicenseGated) return null;
   let result = null;
   const candidates = _tokenSubcommand ? [_tokenSubcommand] : _TOKEN_SUBCOMMANDS;
   for (const sub of candidates) {
@@ -123,6 +138,9 @@ function fmTokenCount(text, instructions) {
         input: text || "",
         encoding: "utf8",
         timeout: 5000,
+        // Capture stderr instead of inheriting it: the license banner would
+        // otherwise print on every failed count.
+        stdio: ["pipe", "pipe", "pipe"],
       });
       const n = parseInt(out.trim(), 10);
       if (Number.isFinite(n)) {
@@ -130,7 +148,15 @@ function fmTokenCount(text, instructions) {
         _tokenSubcommand = sub;
         break;
       }
-    } catch {
+    } catch (err) {
+      if (_isLicenseGate(err)) {
+        _fmLicenseGated = true;
+        console.error(
+          "[fm-proxy] `fm` is blocked by the Apple Foundation Models CLI legal notice. " +
+            "Token counts fall back to estimates. Run `sudo fm license` in Terminal.app to fix this.",
+        );
+        break;
+      }
       // try the next name; leave _tokenSubcommand unset so a transient failure
       // (e.g. missing binary) re-probes rather than pinning a bad name
     }
@@ -149,7 +175,14 @@ function fmTokenCount(text, instructions) {
 function countPromptTokens(messages) {
   const { instructions, prompt } = splitMessages(messages);
   const n = fmTokenCount(prompt, instructions);
-  return n != null ? n : estimateTokens(instructions + "\n" + prompt);
+  if (n == null) return estimateTokens(instructions + "\n" + prompt);
+  // Beta 5 split the two counting modes apart. With -i, `count-tokens` applies the
+  // full conversation framing and matches fm serve's prompt_tokens EXACTLY (verified
+  // 0 diff at instruction lengths 11–300 chars). Without -i it counts raw prompt
+  // tokens only, landing a flat 54 below fm serve (verified 54 at prompt lengths
+  // 6–400 chars). Add the framing back so a request with no system message reports
+  // the same number as one that has one.
+  return instructions ? n : n + CONVERSATION_FRAMING;
 }
 
 // ── Assembled-request instrumentation ────────────────────────────────────────
@@ -551,6 +584,15 @@ function classifyError(msg, parsedReq) {
   // failure is the model/decoder's, not the client's.
   if (m.includes("failed to parse generated content"))
     return { type: "server_error", code: "generation_parse_failed", retry: false, label: "GENERATION PARSE FAILED" };
+  // Beta 5 (fm 2.0.68) re-worded the forced-tool_choice crash: the `system` engine now
+  // rejects it with a clean 500 "An unsupported generation guide was used." in ~140ms
+  // instead of Beta 3/4's LanguageModelError -1. That new wording matches none of the
+  // branches below, so without this it fell through to the retryable default and burned
+  // the whole backoff ladder on a permanent request-shape rejection. Terminal by
+  // construction: the generation guide is fixed by the request, so a retry sends it again.
+  if (m.includes("unsupported generation guide"))
+    return { type: "invalid_request_error", code: "tool_choice_unsupported", retry: false,
+             label: "UNSUPPORTED GENERATION GUIDE (forced tool_choice)" };
   if (m.includes("languagemodelerror") || m.includes("error -1") || m.includes("rate limit") || m.includes("rate_limit")) {
     // Beta 3 bug (verified live): tool_choice:"required" (or a forced function) crashes
     // fm serve's `system` engine with this EXACT signature — deterministic and
@@ -576,7 +618,7 @@ function errorFrame(cls, msg) {
 
 // Exported for tests when required as a module; harmless when run directly.
 if (require.main !== module) {
-  module.exports = { fixTools, fixToolSchema, fixResponseFormatSchema, expandToolCallArguments, classifyError, errorFrame, fmTokenCount };
+  module.exports = { fixTools, fixToolSchema, fixResponseFormatSchema, expandToolCallArguments, classifyError, errorFrame, fmTokenCount, _isLicenseGate };
 }
 
 // CORS so browser-based OpenAI clients (open-webui, web apps hitting the base URL
@@ -651,6 +693,14 @@ const server = http.createServer((req, res) => {
     let fixed = toolFixed;
     if (isStream && parsedReq) {
       parsedReq.stream_options = { ...(parsedReq.stream_options || {}), include_usage: true };
+      fixed = JSON.stringify(parsedReq);
+    } else if (isChat && parsedReq && parsedReq.stream === undefined) {
+      // macOS 27 Beta 5 (fm 2.0.68) flipped the default: a chat request that OMITS
+      // `stream` now comes back as text/event-stream, where every earlier build (and
+      // the OpenAI spec) returns a single JSON object. Only an explicit
+      // `stream:false` still selects JSON. Clients that never set the field — most
+      // OpenAI SDKs — would get an SSE body they cannot parse, so pin it here.
+      parsedReq.stream = false;
       fixed = JSON.stringify(parsedReq);
     }
     // Compute the full assembled size fm serve actually frames (messages + tool
