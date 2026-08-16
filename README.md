@@ -47,25 +47,21 @@ on-device (`system`) and on Apple's Private Cloud Compute (`pcc`). It includes a
 > leaked tokens, so switching model does not work around it. Tool calling works
 > again if you stay on Beta 4.
 
-> [!WARNING]
-> **`$defs` structured output hangs on Beta 5, and takes the server down with it.**
-> A `response_format` schema that uses `$defs`/`$ref` never returns. Worse, one such
-> request leaves `fm serve` unable to answer anything else — later requests time out,
-> then fail with `SensitiveContentAnalysisML error 15` — until you restart it. The
-> proxy's dialect injection is what triggers the hang; without it the same schema
-> gets a fast, honest `400`. Flatten your schema inline on Beta 5. Flat and
-> inline-nested schemas work normally.
->
-> The hang is `system`-only. On `pcc` the same schema fails in ~1s with a
-> *safety-guardrail* error, which the proxy reports as
-> `finish_reason:"content_filter"` with empty content. That is upstream mislabelling
-> a schema problem — do not read it as a content problem.
+> [!NOTE]
+> **`$defs` schemas break `fm serve` on Beta 5 — the proxy works around it.** Sent
+> straight to `fm serve`, a `response_format` schema using `$defs`/`$ref` either 400s
+> (no dialect) or, with the dialect Beta 3/4 required, **hangs forever and leaves the
+> server unable to answer anything until it is restarted**. The proxy now inlines
+> `$ref`s and drops `$defs` entirely, so your schema reaches `fm serve` as plain
+> inline nesting, which it handles fine. Verified on Beta 5: 3/3 in ~1.2s on
+> `system` and `pcc`, with no poisoning. Use the proxy for `$defs` schemas; do not
+> hand them to `fm serve` yourself.
 
 ## What it includes
 
 - **Chat completions** — streaming and non-streaming.
 - **Fixed tool / function calling** — Accepts standard OpenAI `tools`, including rich nested schemas. `fm serve` decodes nested objects, arrays-of-objects, and (as of Beta 4) object chains of any depth natively; the proxy only falls back to a JSON-string round-trip for the one shape still verified broken upstream (`array<array<object>>`), best-effort.
-- **Fixed structured output** — `response_format: {type:"json_schema",...}` works with plain, undecorated OpenAI/pydantic-style schemas (including `$defs`/`$ref`, the shape virtually every real schema generator emits). `fm serve` requires its own `title`/`x-order`/`required`/`additionalProperties` dialect on every object schema reached through `$defs`; the proxy injects it automatically so ordinary client schemas just work. **Broken on Beta 5** — see the `$defs` warning above; flatten your schema inline until Apple fixes it.
+- **Fixed structured output** — `response_format: {type:"json_schema",...}` works with plain, undecorated OpenAI/pydantic-style schemas (including `$defs`/`$ref`, the shape virtually every real schema generator emits). `fm serve` requires its own `title`/`x-order`/`required`/`additionalProperties` dialect on every object schema reached through `$defs`; the proxy handles it automatically so ordinary client schemas just work. It resolves `$ref`s inline and removes `$defs` before forwarding, which needs no dialect at all and avoids the Beta 5 hang described above. Cyclic (self-referencing) schemas cannot be inlined, so those still get the dialect.
 - **Corrected non-streaming default** — Beta 5 returns `text/event-stream` for a chat
   request that omits `stream`, where the OpenAI spec (and every earlier build) returns
   one JSON object. Most OpenAI SDKs omit the field, so they got a body they could not

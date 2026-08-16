@@ -459,11 +459,55 @@ function decorateDialect(node, titleHint) {
   if (typeof node.additionalProperties !== "boolean") node.additionalProperties = false;
 }
 
-// Mutates and returns a response_format `schema` in place: every object schema inside
-// `$defs` gets fm's dialect; the top-level schema and any inline-only nested objects
-// (no $defs involved) are left exactly as the caller sent them.
+// Replace every `$ref: "#/$defs/Name"` with a copy of the definition it points at, then
+// drop `$defs` entirely. Returns a new schema, or null if the schema cannot be inlined
+// (a cyclic or unresolvable ref) so the caller can fall back.
+//
+// Sibling keys beat the target's, per JSON Schema 2020-12: `{$ref, description}` keeps
+// its own description. Each branch carries its own `active` set, so a definition reused
+// in two sibling properties inlines twice (fine) while a definition that reaches itself
+// is a cycle (not fine — inlining would not terminate).
+const DEFS_REF_PREFIX = "#/$defs/";
+function inlineDefs(schema) {
+  const defs = schema.$defs;
+  let bailed = false;
+  const walk = (node, active) => {
+    if (Array.isArray(node)) return node.map((n) => walk(n, active));
+    if (!node || typeof node !== "object") return node;
+    if (typeof node.$ref === "string") {
+      const name = node.$ref.startsWith(DEFS_REF_PREFIX) ? node.$ref.slice(DEFS_REF_PREFIX.length) : null;
+      if (name === null || !Object.prototype.hasOwnProperty.call(defs, name) || active.has(name)) {
+        bailed = true;
+        return node;
+      }
+      const { $ref, ...siblings } = node;
+      return { ...walk(defs[name], new Set(active).add(name)), ...siblings };
+    }
+    const out = {};
+    for (const [k, v] of Object.entries(node)) out[k] = walk(v, active);
+    return out;
+  };
+  const result = walk(schema, new Set());
+  delete result.$defs;
+  return bailed ? null : result;
+}
+
+// Normalise a response_format `schema` into something fm serve accepts.
+//
+// Preferred path: inline the $refs and delete $defs. An object reached only through
+// inline `properties` nesting needs NO dialect keys at all (verified live), so this
+// makes a $defs schema work without decorating anything. It also avoids two separate
+// upstream failures: fm serve 400s a $defs object that lacks `x-order`, and on macOS 27
+// Beta 5 (fm 2.0.68) a $defs object that HAS the dialect hangs the `system` engine
+// indefinitely and leaves the server unable to answer anything until it is restarted.
+//
+// Fallback: a cyclic or unresolvable $ref cannot be inlined (a self-referencing tree
+// schema would expand forever). Those keep the old dialect injection — the best
+// available on Beta 3/4, and no worse than before on Beta 5.
 function fixResponseFormatSchema(schema) {
   if (!schema || typeof schema !== "object" || !schema.$defs) return schema;
+  const inlined = inlineDefs(schema);
+  if (inlined) return inlined;
   for (const [name, def] of Object.entries(schema.$defs)) decorateDialect(def, name);
   return schema;
 }
@@ -501,7 +545,8 @@ function fixTools(body) {
     }
     if (parsed.response_format && parsed.response_format.type === "json_schema") {
       const js = parsed.response_format.json_schema;
-      if (js && js.schema) fixResponseFormatSchema(js.schema);
+      // Assign the result: inlining returns a NEW schema rather than mutating in place.
+      if (js && js.schema) js.schema = fixResponseFormatSchema(js.schema);
     }
     return { body: JSON.stringify(parsed), coercion, parsed };
   } catch {

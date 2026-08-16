@@ -363,7 +363,7 @@ test("multi-level inline-nested response_format schema with no $defs is left unt
   assert.deepStrictEqual(schema, before);
 });
 
-test("a $defs entry gets title, x-order, required, and additionalProperties injected", () => {
+test("a $defs/$ref schema is inlined: the ref is replaced and $defs is dropped", () => {
   const schema = {
     type: "object",
     properties: { name: { type: "string" }, address: { $ref: "#/$defs/Address" } },
@@ -372,135 +372,105 @@ test("a $defs entry gets title, x-order, required, and additionalProperties inje
       Address: {
         type: "object",
         properties: { street: { type: "string" }, city: { type: "string" } },
+        required: ["street"],
       },
     },
   };
-  fixResponseFormatSchema(schema);
-  const addr = schema.$defs.Address;
-  assert.strictEqual(addr.title, "Address");
-  assert.deepStrictEqual(addr["x-order"], ["street", "city"]);
-  assert.deepStrictEqual(addr.required, []);
-  assert.strictEqual(addr.additionalProperties, false);
-});
-
-test("an existing required array on a $defs entry is preserved (filtered to real properties)", () => {
-  const schema = {
+  const out = fixResponseFormatSchema(schema);
+  assert.strictEqual(out.$defs, undefined, "$defs must be gone");
+  assert.deepStrictEqual(out.properties.address, {
     type: "object",
-    properties: { address: { $ref: "#/$defs/Address" } },
-    $defs: {
-      Address: {
-        type: "object",
-        properties: { street: { type: "string" }, city: { type: "string" } },
-        required: ["street", "city", "ghost"],
-      },
-    },
-  };
-  fixResponseFormatSchema(schema);
-  assert.deepStrictEqual(schema.$defs.Address.required, ["street", "city"]);
+    properties: { street: { type: "string" }, city: { type: "string" } },
+    required: ["street"],
+  });
+  // Inlined objects are reached only through `properties`, so they need NO dialect.
+  // Adding it is what hangs the system engine on Beta 5.
+  assert.strictEqual(out.properties.address.title, undefined);
+  assert.strictEqual(out.properties.address["x-order"], undefined);
+  assert.strictEqual(out.properties.address.additionalProperties, undefined);
+  assert.strictEqual(out.title, undefined, "top level stays dialect-free too");
 });
 
-test("an already-set additionalProperties on a $defs entry is preserved, not overwritten", () => {
-  const schema = {
-    type: "object",
-    properties: {},
-    $defs: { X: { type: "object", properties: {}, additionalProperties: true } },
-  };
-  fixResponseFormatSchema(schema);
-  assert.strictEqual(schema.$defs.X.additionalProperties, true);
-});
-
-test("an inline nested object INSIDE a $defs entry also gets the dialect (cascades)", () => {
-  const schema = {
-    type: "object",
-    properties: { address: { $ref: "#/$defs/Address" } },
-    $defs: {
-      Address: {
-        type: "object",
-        properties: {
-          street: { type: "string" },
-          geo: {
-            type: "object",
-            properties: { lat: { type: "number" }, lng: { type: "number" } },
-            required: ["lat", "lng"],
-          },
-        },
-        required: ["street", "geo"],
-      },
-    },
-  };
-  fixResponseFormatSchema(schema);
-  const geo = schema.$defs.Address.properties.geo;
-  assert.strictEqual(geo.title, "Geo");
-  assert.deepStrictEqual(geo["x-order"], ["lat", "lng"]);
-  assert.deepStrictEqual(geo.required, ["lat", "lng"]);
-  assert.strictEqual(geo.additionalProperties, false);
-});
-
-test("an object reached through an array's items inside a $defs entry gets the dialect", () => {
-  const schema = {
+test("a $ref inside an array's items is inlined", () => {
+  const out = fixResponseFormatSchema({
     type: "object",
     properties: { reviews: { type: "array", items: { $ref: "#/$defs/Review" } } },
-    $defs: {
-      Review: {
-        type: "object",
-        properties: { author: { type: "string" }, text: { type: "string" } },
-        required: ["author", "text"],
-      },
-    },
-  };
-  fixResponseFormatSchema(schema);
-  const review = schema.$defs.Review;
-  assert.strictEqual(review.title, "Review");
-  assert.deepStrictEqual(review["x-order"], ["author", "text"]);
+    $defs: { Review: { type: "object", properties: { author: { type: "string" } }, required: ["author"] } },
+  });
+  assert.strictEqual(out.$defs, undefined);
+  assert.deepStrictEqual(out.properties.reviews.items, {
+    type: "object", properties: { author: { type: "string" } }, required: ["author"],
+  });
 });
 
-test("the top-level schema is left dialect-free even when $defs is present", () => {
+test("a definition that itself holds a $ref is inlined all the way down", () => {
+  const out = fixResponseFormatSchema({
+    type: "object",
+    properties: { user: { $ref: "#/$defs/User" } },
+    $defs: {
+      User: { type: "object", properties: { home: { $ref: "#/$defs/Address" } }, required: ["home"] },
+      Address: { type: "object", properties: { city: { type: "string" } }, required: ["city"] },
+    },
+  });
+  assert.strictEqual(out.$defs, undefined);
+  assert.deepStrictEqual(out.properties.user.properties.home, {
+    type: "object", properties: { city: { type: "string" } }, required: ["city"],
+  });
+});
+
+test("one definition used by two properties is inlined into both, independently", () => {
+  const out = fixResponseFormatSchema({
+    type: "object",
+    properties: { home: { $ref: "#/$defs/Address" }, work: { $ref: "#/$defs/Address" } },
+    $defs: { Address: { type: "object", properties: { city: { type: "string" } } } },
+  });
+  assert.deepStrictEqual(out.properties.home, out.properties.work);
+  assert.notStrictEqual(out.properties.home, out.properties.work, "must be separate objects, not shared");
+});
+
+test("sibling keys alongside a $ref survive and win over the target's", () => {
+  const out = fixResponseFormatSchema({
+    type: "object",
+    properties: { home: { $ref: "#/$defs/Address", description: "where they live" } },
+    $defs: { Address: { type: "object", description: "an address", properties: { city: { type: "string" } } } },
+  });
+  assert.strictEqual(out.properties.home.description, "where they live");
+  assert.deepStrictEqual(out.properties.home.properties, { city: { type: "string" } });
+});
+
+// A self-referencing schema cannot be inlined — expansion would never terminate — so
+// it falls back to the old dialect injection. That is the best available on Beta 3/4,
+// and no worse than the previous behaviour on Beta 5.
+test("a cyclic $ref falls back to dialect injection instead of expanding forever", () => {
   const schema = {
     type: "object",
-    properties: { name: { type: "string" }, address: { $ref: "#/$defs/Address" } },
-    required: ["name", "address"],
+    properties: { root: { $ref: "#/$defs/Node" } },
     $defs: {
-      Address: { type: "object", properties: { street: { type: "string" } }, required: ["street"] },
+      Node: { type: "object", properties: { child: { $ref: "#/$defs/Node" } }, required: [] },
     },
   };
-  fixResponseFormatSchema(schema);
-  assert.strictEqual(schema.title, undefined);
-  assert.strictEqual(schema["x-order"], undefined);
-  assert.strictEqual(schema.additionalProperties, undefined);
+  const out = fixResponseFormatSchema(schema);
+  assert.ok(out.$defs, "cyclic schema keeps $defs");
+  assert.strictEqual(out.$defs.Node.title, "Node");
+  assert.deepStrictEqual(out.$defs.Node["x-order"], ["child"]);
 });
 
-test("a mixed schema: inline-nested object outside $defs stays untouched, $defs entry gets decorated", () => {
-  const schema = {
+test("an unresolvable $ref falls back rather than dropping the reference", () => {
+  const out = fixResponseFormatSchema({
     type: "object",
-    properties: {
-      name: { type: "string" },
-      rating: {
-        type: "object",
-        properties: { score: { type: "number" }, count: { type: "integer" } },
-        required: ["score", "count"],
-      },
-      address: { $ref: "#/$defs/Address" },
-    },
-    required: ["name", "rating", "address"],
-    $defs: {
-      Address: { type: "object", properties: { street: { type: "string" } }, required: ["street"] },
-    },
-  };
-  fixResponseFormatSchema(schema);
-  assert.strictEqual(schema.properties.rating.title, undefined);
-  assert.strictEqual(schema.properties.rating["x-order"], undefined);
-  assert.strictEqual(schema.$defs.Address.title, "Address");
-  assert.deepStrictEqual(schema.$defs.Address["x-order"], ["street"]);
+    properties: { x: { $ref: "#/$defs/Missing" } },
+    $defs: { Present: { type: "object", properties: { a: { type: "string" } } } },
+  });
+  assert.ok(out.$defs, "unresolvable ref keeps $defs so the ref still points somewhere");
 });
 
-test("a schema with an empty $defs object is left untouched (no-op, not an error)", () => {
-  const schema = { type: "object", properties: { name: { type: "string" } }, $defs: {} };
-  const before = JSON.parse(JSON.stringify(schema));
-  fixResponseFormatSchema(schema);
-  assert.deepStrictEqual(schema, before);
+test("a schema with an empty $defs object just loses the empty $defs", () => {
+  const out = fixResponseFormatSchema({ type: "object", properties: { name: { type: "string" } }, $defs: {} });
+  assert.deepStrictEqual(out, { type: "object", properties: { name: { type: "string" } } });
 });
 
-test("fixTools also decorates response_format.json_schema.schema.$defs in the request body", () => {
+
+test("fixTools inlines response_format.json_schema.schema.$defs in the request body", () => {
   const { body } = fixTools(JSON.stringify({
     model: "system",
     messages: [{ role: "user", content: "hi" }],
@@ -519,13 +489,12 @@ test("fixTools also decorates response_format.json_schema.schema.$defs in the re
       },
     },
   }));
-  const parsed = JSON.parse(body);
-  const addr = parsed.response_format.json_schema.schema.$defs.Address;
-  assert.strictEqual(addr.title, "Address");
-  assert.deepStrictEqual(addr["x-order"], ["street"]);
-  assert.strictEqual(addr.additionalProperties, false);
-  // top level untouched
-  assert.strictEqual(parsed.response_format.json_schema.schema.title, undefined);
+  const schema = JSON.parse(body).response_format.json_schema.schema;
+  assert.strictEqual(schema.$defs, undefined, "$defs must not reach fm serve");
+  assert.deepStrictEqual(schema.properties.address, {
+    type: "object", properties: { street: { type: "string" } }, required: ["street"],
+  });
+  assert.strictEqual(schema.title, undefined, "no dialect anywhere");
 });
 
 test("fixTools leaves a request with no response_format untouched (no crash, no field added)", () => {
@@ -710,7 +679,7 @@ test("a client tool with no description reaches upstream with description backfi
   } finally { await stack.stop(); }
 });
 
-test("a plain response_format with $defs/$ref (no dialect) reaches upstream fully decorated", async () => {
+test("a plain response_format with $defs/$ref reaches upstream inlined, with no $defs", async () => {
   const stack = await startStack();
   try {
     const payload = JSON.stringify({
@@ -735,12 +704,12 @@ test("a plain response_format with $defs/$ref (no dialect) reaches upstream full
       { method: "POST", path: "/v1/chat/completions", headers: { "content-type": "application/json" } },
       payload);
     assert.strictEqual(res.status, 200, `body=${res.body} stderr=${stack.getStderr()}`);
-    const got = stack.getLastBody();
-    const addr = got.response_format.json_schema.schema.$defs.Address;
-    assert.strictEqual(addr.title, "Address");
-    assert.deepStrictEqual(addr["x-order"], ["street"]);
-    assert.strictEqual(addr.additionalProperties, false);
-    assert.strictEqual(got.response_format.json_schema.schema.title, undefined);
+    const schema = stack.getLastBody().response_format.json_schema.schema;
+    assert.strictEqual(schema.$defs, undefined, "$defs must not reach fm serve");
+    assert.deepStrictEqual(schema.properties.address, {
+      type: "object", properties: { street: { type: "string" } }, required: ["street"],
+    });
+    assert.strictEqual(schema.title, undefined);
   } finally { await stack.stop(); }
 });
 

@@ -297,10 +297,17 @@ consecutive flat requests pass (0.6–3.8 s) with no `$defs` in the run, so
 repetition alone is not the cause. Much of what looked like general "model
 flakiness" earlier in this audit was this poisoning.
 
-Consequence: the proxy's `fixResponseFormatSchema` turns a fast, honest 400 into an
-indefinite hang plus a dead server. Do not use `$defs`/`$ref` `response_format` on
-Beta 5 — flatten the schema inline instead. Recheck on the next beta before trusting
-the injector again.
+**Fixed by inlining (2026-08-15).** `fixResponseFormatSchema` no longer injects the
+dialect as its primary path. It now resolves every `$ref: "#/$defs/..."` into a copy of
+its definition and deletes `$defs`, so the schema reaches `fm serve` as plain inline
+nesting — which needs no dialect keys and therefore triggers neither the 400 nor the
+hang. Sibling keys beside a `$ref` win over the target's, per JSON Schema 2020-12.
+Verified live on Beta 5: 3/3 through the proxy in 1.2–1.6 s on `system`, 672 ms on
+`pcc`, correct nested output, and plain chat healthy afterwards (no poisoning).
+
+Cyclic or unresolvable refs cannot be inlined — a self-referencing tree schema would
+expand forever — so those fall back to the old dialect injection. That is still correct
+on Beta 3/4 and no worse than before on Beta 5.
 
 **PCC results (Beta 5, `fm serve` foreground in Terminal.app, 2026-08-15):**
 
