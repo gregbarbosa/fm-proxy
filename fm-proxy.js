@@ -36,10 +36,10 @@ const PROXY_PORT = Number(process.env.PROXY_PORT) || 1977;
 //      do NOT retry; we surface it at once. Benign code triggers it, so it is NOT a
 //      judgment that the user's content is unsafe.
 //   3. Forced tool_choice on `system`: a request with `model:"system"` and
-//      `tool_choice:"required"` (or a specific function pin) crashes fm serve with the
-//      IDENTICAL "LanguageModelError -1" signature as #1 — but it's deterministic and
-//      permanent (`pcc` handles it fine), not transient, so it must NOT be retried.
-//      classifyError() distinguishes it from #1 by checking the original request.
+//      `tool_choice:"required"` (or a specific function pin) is rejected by fm serve
+//      with "An unsupported generation guide was used." — deterministic and permanent
+//      (`pcc` accepts it fine), not transient, so it must NOT be retried. Its own
+//      wording tells it apart from #1, so no request context is needed.
 // classifyError() maps each to an OpenAI-shaped outcome so clients can branch without
 // string-matching Apple's prose:
 //   - guardrail        → finish_reason:"content_filter" (keep partial; NOT an error — the
@@ -55,15 +55,15 @@ const RETRY_CAP_MS = Number(process.env.FM_RETRY_CAP_MS ?? 15000);
 // ── Token counting ───────────────────────────────────────────────────────────
 // Apple's `fm serve` used to report prompt_tokens as always 0 on non-streaming
 // responses; that's fixed as of macOS 27 Beta 3 (fm 2.0.59) — verified live against
-// `fm token-count`, non-streaming usage is now passed through untouched (see the
+// `fm count-tokens`, non-streaming usage is now passed through untouched (see the
 // non-streaming response handler). Streaming still sends NO usage at all (also
 // verified live, still broken), so Pi's context gauge would sit at ~0% there without
 // repair — this section still synthesizes usage for the streaming path only.
 //
 // Strategy (hybrid): exact count for the prompt (the big, stable number) via
-// Apple's own `fm token-count`; cheap heuristic for the streamed completion.
+// Apple's own `fm count-tokens`; cheap heuristic for the streamed completion.
 //
-// Calibration (measured against `fm token-count`):
+// Calibration (measured against `fm count-tokens`):
 //   per-turn chat-template overhead ≈ 9 tokens; content ≈ chars / 4.4.
 const PER_TURN_OVERHEAD = 9;
 const CHARS_PER_TOKEN = 4.4;
@@ -94,7 +94,7 @@ function splitMessages(messages) {
   return { instructions: instr.join("\n"), prompt: prompt.join("\n") };
 }
 
-// Exact token count via `fm token-count -q`. Text is piped on stdin to avoid
+// Exact token count via `fm count-tokens -q`. Text is piped on stdin to avoid
 // argv length limits; optional instructions go through -i so the count includes
 // their (heavier) template wrapping, matching how the server frames a turn.
 // Returns null if the binary is missing or errors (callers fall back to the
@@ -105,12 +105,10 @@ function splitMessages(messages) {
 // keyed cache turns those repeats into free lookups. Bounded to keep memory flat.
 const _tokenCache = new Map();
 const _TOKEN_CACHE_MAX = 512;
-// macOS 27 Beta 4 (fm 2.0.62) renamed `fm token-count` to `fm count-tokens` — the
-// old name hard-errors. Probe the new name first, fall back to the old one (Beta 3
-// compat), and remember whichever this build accepts so every later call spawns
-// `fm` exactly once.
-const _TOKEN_SUBCOMMANDS = ["count-tokens", "token-count"];
-let _tokenSubcommand = null;
+// `fm count-tokens` (named `token-count` before Beta 4). This targets Beta 5 only, so
+// there is no fallback to the old name: probing it cost a second `fm` spawn on every
+// failed count and could not succeed on a supported build anyway.
+const TOKEN_SUBCOMMAND = "count-tokens";
 // macOS 27 Beta 5 (fm 2.0.68) added a machine-wide legal-notice gate: until a
 // privileged user runs `sudo fm license`, every subcommand exits 69 and prints a
 // banner to stderr. That failure is permanent, not transient, so retrying it once
@@ -129,37 +127,29 @@ function fmTokenCount(text, instructions) {
   if (_tokenCache.has(key)) return _tokenCache.get(key);
   if (_fmLicenseGated) return null;
   let result = null;
-  const candidates = _tokenSubcommand ? [_tokenSubcommand] : _TOKEN_SUBCOMMANDS;
-  for (const sub of candidates) {
-    try {
-      const args = [sub, "-q"];
-      if (instructions) args.push("-i", instructions);
-      const out = execFileSync("/usr/bin/fm", args, {
-        input: text || "",
-        encoding: "utf8",
-        timeout: 5000,
-        // Capture stderr instead of inheriting it: the license banner would
-        // otherwise print on every failed count.
-        stdio: ["pipe", "pipe", "pipe"],
-      });
-      const n = parseInt(out.trim(), 10);
-      if (Number.isFinite(n)) {
-        result = n;
-        _tokenSubcommand = sub;
-        break;
-      }
-    } catch (err) {
-      if (_isLicenseGate(err)) {
-        _fmLicenseGated = true;
-        console.error(
-          "[fm-proxy] `fm` is blocked by the Apple Foundation Models CLI legal notice. " +
-            "Token counts fall back to estimates. Run `sudo fm license` in Terminal.app to fix this.",
-        );
-        break;
-      }
-      // try the next name; leave _tokenSubcommand unset so a transient failure
-      // (e.g. missing binary) re-probes rather than pinning a bad name
+  try {
+    const args = [TOKEN_SUBCOMMAND, "-q"];
+    if (instructions) args.push("-i", instructions);
+    const out = execFileSync("/usr/bin/fm", args, {
+      input: text || "",
+      encoding: "utf8",
+      timeout: 5000,
+      // Capture stderr instead of inheriting it: the license banner would
+      // otherwise print on every failed count.
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+    const n = parseInt(out.trim(), 10);
+    if (Number.isFinite(n)) result = n;
+  } catch (err) {
+    if (_isLicenseGate(err)) {
+      _fmLicenseGated = true;
+      console.error(
+        "[fm-proxy] `fm` is blocked by the Apple Foundation Models CLI legal notice. " +
+          "Token counts fall back to estimates. Run `sudo fm license` in Terminal.app to fix this.",
+      );
     }
+    // Any other failure (missing binary, timeout) stays retryable: result is null,
+    // the caller falls back to the heuristic, and nothing is cached.
   }
   // Cache only successful counts; a null is a transient failure worth retrying.
   if (result != null) {
@@ -596,24 +586,16 @@ function rewriteToolCalls(toolCalls, coercion) {
   return changed;
 }
 
-// True if `toolChoice` forces the model to call something: OpenAI's "required", or an
-// explicit {type:"function", function:{name}} pin. "auto"/absent doesn't force a call.
-function isForcedToolChoice(toolChoice) {
-  return toolChoice === "required" ||
-    !!(toolChoice && typeof toolChoice === "object" && toolChoice.type === "function");
-}
-
 // Classify an upstream fm-serve error message into a distinct OpenAI-shaped error type
 // so clients can branch on the *cause* rather than string-matching Apple's prose. The
 // failure modes (see header comment) need different client remedies:
 //   - rate-limit: transient, retry.
 //   - safety-guardrail abort: deterministic + terminal, do NOT retry.
-//   - forced tool_choice on `system`: deterministic + terminal, do NOT retry.
-// `retry` tells the streaming/non-stream paths whether backoff is worthwhile.
-// `parsedReq` (the original request body) is optional context used only to distinguish
-// the tool_choice crash below from a real rate limit — every call site has it in scope
-// and passes it; omitting it just skips that one distinction.
-function classifyError(msg, parsedReq) {
+//   - forced tool_choice (Beta 5 wording): deterministic + terminal, do NOT retry.
+// `retry` tells the streaming/non-stream paths whether backoff is worthwhile. Every
+// case is decided from the message alone — Beta 3/4 needed the original request to
+// tell a tool_choice crash from a rate limit, Beta 5 does not.
+function classifyError(msg) {
   const m = String(msg || "").toLowerCase();
   if (m.includes("guardrail"))
     return { type: "generation_aborted", code: "safety_guardrail", retry: false, label: "SAFETY-GUARDRAIL ABORT" };
@@ -638,19 +620,14 @@ function classifyError(msg, parsedReq) {
   if (m.includes("unsupported generation guide"))
     return { type: "invalid_request_error", code: "tool_choice_unsupported", retry: false,
              label: "UNSUPPORTED GENERATION GUIDE (forced tool_choice)" };
-  if (m.includes("languagemodelerror") || m.includes("error -1") || m.includes("rate limit") || m.includes("rate_limit")) {
-    // Beta 3 bug (verified live): tool_choice:"required" (or a forced function) crashes
-    // fm serve's `system` engine with this EXACT signature — deterministic and
-    // permanent, not a rate limit. `pcc` handles forced tool_choice fine, so this is
-    // scoped to `system` only. Must be checked here, before the generic rate-limit
-    // branch, or the proxy retry-loops a permanent request-shape bug for ~19.5s before
-    // surfacing it mislabeled as transient.
-    if (parsedReq && parsedReq.model === "system" && isForcedToolChoice(parsedReq.tool_choice)) {
-      return { type: "invalid_request_error", code: "tool_choice_unsupported", retry: false,
-               label: "TOOL_CHOICE CRASH (system engine)" };
-    }
+  // On Beta 3/4 this signature ALSO meant "forced tool_choice crashed the system
+  // engine", so it was reclassified when the request looked like that. Beta 5 rejects
+  // forced tool_choice with its own message (handled above), so that reclassification
+  // can no longer be right here — it would only mislabel a genuine rate limit that
+  // happened to arrive on a forced-tool_choice request as a permanent client error,
+  // and skip the retry that would have recovered it. Removed with Beta 3/4 support.
+  if (m.includes("languagemodelerror") || m.includes("error -1") || m.includes("rate limit") || m.includes("rate_limit"))
     return { type: "rate_limit_exceeded", code: -1, retry: true, label: "RATE-LIMIT" };
-  }
   return { type: "server_error", code: "internal_error", retry: true, label: "UPSTREAM ERROR" };
 }
 
@@ -905,7 +882,7 @@ const server = http.createServer((req, res) => {
                     obj = JSON.parse(payload);
                     isErr = isErrorPayload(obj);
                     if (isErr) {
-                      errCls = classifyError(obj.error && obj.error.message, parsedReq);
+                      errCls = classifyError(obj.error && obj.error.message);
                     } else if (obj.usage && (!obj.choices || obj.choices.length === 0)) {
                       // fm serve's real final usage-only chunk (choices:[], usage:{...}),
                       // present because we forced stream_options.include_usage upstream.
@@ -938,7 +915,7 @@ const server = http.createServer((req, res) => {
                   } catch { /* keepalive / non-JSON */ }
                 } else if (/languagemodelerror|error -1/i.test(t)) {
                   isErr = true; // raw (non-data) error line
-                  errCls = classifyError(t, parsedReq);
+                  errCls = classifyError(t);
                 } else if (t.startsWith("{")) {
                   // fm serve returns non-SSE errors (e.g. HTTP 503 service_unavailable
                   // for a missing-PCC-attribution `pcc` request) as BARE JSON, not a
@@ -948,7 +925,7 @@ const server = http.createServer((req, res) => {
                     obj = JSON.parse(t);
                     if (isErrorPayload(obj)) {
                       isErr = true;
-                      errCls = classifyError(obj.error && obj.error.message, parsedReq);
+                      errCls = classifyError(obj.error && obj.error.message);
                     }
                   } catch { /* not an error JSON */ }
                 }
@@ -1010,7 +987,7 @@ const server = http.createServer((req, res) => {
                 commit();
                 if (!sawFinish && completionText === "" && !surfacedError) {
                   diag("GIVING UP (empty stream after retries)", `rawTail=${JSON.stringify(rawTail)}`);
-                  res.write(errorFrame(classifyError("rate limit", parsedReq),
+                  res.write(errorFrame(classifyError("rate limit"),
                     "upstream returned no output (likely PCC rate limit) after retries"));
                 }
               }
@@ -1084,7 +1061,7 @@ const server = http.createServer((req, res) => {
             try { obj = JSON.parse(raw); } catch { /* not JSON */ }
             let outStatus = proxyRes.statusCode;
             if (isErrorPayload(obj)) {
-              const cls = classifyError(obj.error && obj.error.message, parsedReq);
+              const cls = classifyError(obj.error && obj.error.message);
               diag(`${cls.label} (non-stream)`, `— ${raw.slice(0, 200)}`);
               if (cls.type === "generation_aborted") {
                 // content_filter: return a normal completion finished by the filter
@@ -1108,7 +1085,7 @@ const server = http.createServer((req, res) => {
             let out = raw;
             if (obj) {
               // fm serve 2.0.59+ (macOS 27 Beta 3) reports real, accurate non-streaming
-              // usage (verified live against `fm token-count`) — no override needed here
+              // usage (verified live against `fm count-tokens`) — no override needed here
               // anymore. Streaming still sends none at all, so that path (below) still
               // synthesizes it from promptTokens/completionTokens.
               // Re-expand JSON-string tool-call args back to real objects.

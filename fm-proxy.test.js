@@ -740,12 +740,6 @@ test("classifyError: LanguageModelError -1 is a retryable rate-limit", () => {
 // request (model + tool_choice) to avoid retry-looping a permanent bug for ~19.5s
 // before mislabeling it as rate_limit_exceeded.
 
-test("classifyError: tool_choice:required on model=system reclassifies as a permanent, non-retryable bug", () => {
-  const c = classifyError("LanguageModelError -1", { model: "system", tool_choice: "required" });
-  assert.strictEqual(c.type, "invalid_request_error");
-  assert.strictEqual(c.retry, false);
-});
-
 // Beta 5 re-worded the same crash to "An unsupported generation guide was used."
 // That wording matches no other branch, so before it was handled it fell through to
 // the retryable default and burned the whole backoff ladder. It is terminal, and —
@@ -757,22 +751,19 @@ test("classifyError: Beta 5's 'unsupported generation guide' is terminal without
   assert.strictEqual(c.retry, false);
 });
 
-test("classifyError: a forced function tool_choice on model=system also reclassifies", () => {
-  const c = classifyError("LanguageModelError -1", {
-    model: "system", tool_choice: { type: "function", function: { name: "foo" } },
-  });
-  assert.strictEqual(c.type, "invalid_request_error");
-  assert.strictEqual(c.retry, false);
-});
-
-test("classifyError: the identical error on model=pcc is NOT reclassified (bug is system-only)", () => {
-  const c = classifyError("LanguageModelError -1", { model: "pcc", tool_choice: "required" });
+// Beta 3/4 also produced LanguageModelError -1 for a forced tool_choice, so the proxy
+// used to reclassify it by inspecting the request. Beta 5 has its own wording for that,
+// which means this signature can now only be a genuine rate limit — including on a
+// request that happens to force a tool call. Reclassifying it here would skip the retry
+// that recovers it.
+test("classifyError: LanguageModelError -1 stays a retryable rate-limit even with a forced tool_choice", () => {
+  const c = classifyError("LanguageModelError -1");
   assert.strictEqual(c.type, "rate_limit_exceeded");
   assert.strictEqual(c.retry, true);
 });
 
-test("classifyError: model=system WITHOUT a forced tool_choice still classifies as a normal rate-limit", () => {
-  assert.strictEqual(classifyError("LanguageModelError -1", { model: "system", tool_choice: "auto" }).type, "rate_limit_exceeded");
+test("classifyError: a plain LanguageModelError -1 classifies as a normal rate-limit", () => {
+  assert.strictEqual(classifyError("LanguageModelError -1").type, "rate_limit_exceeded");
   assert.strictEqual(classifyError("LanguageModelError -1", { model: "system" }).type, "rate_limit_exceeded");
 });
 
@@ -919,18 +910,17 @@ test("rate-limit error frame (pre-commit) is surfaced as rate_limit_exceeded", a
   } finally { await stack.stop(); }
 });
 
-test("tool_choice:required on model=system is typed invalid_request_error through the real proxy, not retried as rate-limit", async () => {
-  // Reproduces the live failure: fm serve's `system` engine 500s with the exact
-  // LanguageModelError -1 signature used for PCC rate-limiting when tool_choice
-  // forces a call. The proxy must classify this by inspecting the original request
-  // (model + tool_choice), not just the message text, and must NOT retry it.
+test("a forced tool_choice rejection is typed invalid_request_error through the real proxy, not retried", async () => {
+  // Reproduces the live Beta 5 failure: fm serve's `system` engine 500s with
+  // "An unsupported generation guide was used." when tool_choice forces a call.
+  // The proxy must type it from the message alone and must NOT retry it.
   let requestCount = 0;
   const stack = await startStack({
     handler: (req, parsed, res) => {
       requestCount++;
       res.writeHead(500, { "content-type": "application/json" });
       res.end(JSON.stringify({
-        error: { message: "The operation couldn't be completed. (FoundationModels.LanguageModelError error -1.)", type: "server_error", code: "500" },
+        error: { message: "The operation couldn't be completed. (An unsupported generation guide was used.)", type: "server_error", code: "500" },
       }));
     },
   });
