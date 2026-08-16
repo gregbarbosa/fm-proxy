@@ -332,6 +332,28 @@ Unchanged from Beta 4: PCC still requires Terminal.app (same 503); a missing
 `tool.description` still 400s the whole request; streaming usage still arrives via
 `stream_options.include_usage`.
 
+**End-to-end check with a real client (Pi, 2026-08-15).** Pi → proxy (:1977) →
+`fm serve` (:1976) → PCC works. Two things to know:
+
+- **Pi's full toolset no longer fits.** A first turn fails immediately with
+  "The session's transcript exceeded the model's context size" against `pcc`'s ~32k
+  ceiling. `pi-minimal` (`pi -ne -ns -np --no-themes`) works — a simple turn costs
+  ~11k, a turn with tools ~22k. See [[pcc-context-ceiling]] for the underlying
+  ceiling; Beta 5's tool framing makes the fat-toolset case worse.
+- **The tool-call break is visible from the client.** Asked to run a bash tool, the
+  model replies with a markdown code block containing the command, as prose. Nothing
+  executes, and Pi shows no tool call — exactly what `tool_calls: null` looks like from
+  the other end.
+- The provider key in `~/.pi/agent/models.json` is `" FM"` — it starts with the
+  Apple logo character. `--provider $' FM' --model pcc`; a plain `FM/pcc` will
+  not match.
+
+**Proxy feature sweep on Beta 5 (through the proxy, 12 checks):** non-streaming chat,
+streaming chat, streaming usage relay, `stream`-omitted → JSON, structured output with
+`$defs`, missing-description backfill, vision (`image_url`), CORS preflight,
+`GET /v1/models`, `GET /health`, and fast non-retryable forced-`tool_choice` rejection
+(154 ms) all pass. Only tool calling fails, and that is upstream.
+
 > **Testing caution.** Once `fm serve` is poisoned (see `$defs` above), every later
 > request fails with `com.apple.SensitiveContentAnalysisML error 15`,
 > `LanguageModelError error -1`, or a hang — regardless of what you are testing.
