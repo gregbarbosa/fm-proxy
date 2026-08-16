@@ -45,11 +45,20 @@ on-device (`system`) and on Apple's Private Cloud Compute (`pcc`). It includes a
 > on streaming and non-streaming requests, so `fm-proxy` cannot repair it. Tool
 > calling works again if you stay on Beta 4. Verified on the `system` engine.
 
+> [!WARNING]
+> **`$defs` structured output hangs on Beta 5, and takes the server down with it.**
+> A `response_format` schema that uses `$defs`/`$ref` never returns. Worse, one such
+> request leaves `fm serve` unable to answer anything else — later requests time out,
+> then fail with `SensitiveContentAnalysisML error 15` — until you restart it. The
+> proxy's dialect injection is what triggers the hang; without it the same schema
+> gets a fast, honest `400`. Flatten your schema inline on Beta 5. Flat and
+> inline-nested schemas work normally.
+
 ## What it includes
 
 - **Chat completions** — streaming and non-streaming.
 - **Fixed tool / function calling** — Accepts standard OpenAI `tools`, including rich nested schemas. `fm serve` decodes nested objects, arrays-of-objects, and (as of Beta 4) object chains of any depth natively; the proxy only falls back to a JSON-string round-trip for the one shape still verified broken upstream (`array<array<object>>`), best-effort.
-- **Fixed structured output** — `response_format: {type:"json_schema",...}` works with plain, undecorated OpenAI/pydantic-style schemas (including `$defs`/`$ref`, the shape virtually every real schema generator emits). `fm serve` requires its own `title`/`x-order`/`required`/`additionalProperties` dialect on every object schema reached through `$defs`; the proxy injects it automatically so ordinary client schemas just work.
+- **Fixed structured output** — `response_format: {type:"json_schema",...}` works with plain, undecorated OpenAI/pydantic-style schemas (including `$defs`/`$ref`, the shape virtually every real schema generator emits). `fm serve` requires its own `title`/`x-order`/`required`/`additionalProperties` dialect on every object schema reached through `$defs`; the proxy injects it automatically so ordinary client schemas just work. **Broken on Beta 5** — see the `$defs` warning above; flatten your schema inline until Apple fixes it.
 - **Corrected non-streaming default** — Beta 5 returns `text/event-stream` for a chat
   request that omits `stream`, where the OpenAI spec (and every earlier build) returns
   one JSON object. Most OpenAI SDKs omit the field, so they got a body they could not

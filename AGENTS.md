@@ -279,18 +279,40 @@ All items verified live against `fm serve` on the `system` engine.
 | **Tool calling** | **Broken upstream.** `tool_calls` is always `null`, `finish_reason:"stop"`, and raw control tokens leak into content (`"<ctrl46>get_time<ctrl46>"`). The model emits the call; `fm serve`'s parser does not read it. Reproduced direct and through the proxy, streaming and non-streaming. | None possible. Documented in the README. |
 | **String `title`** | A string property carrying `title` is now a "named string type" and 400s with `"Named string types must have a non-empty enum field"`. Object `title` is still fine. | None needed — `decorateDialect` only titles object schemas, never strings. |
 
-Unchanged from Beta 4: PCC still requires Terminal.app (same 503); a missing
-`tool.description` still 400s the whole request; `$defs` still needs `x-order`
-injection (verified: raw `$defs` 400s with `Key 'x-order' not found`); streaming
-usage still arrives via `stream_options.include_usage`.
+**`$defs` structured output is unusable in Beta 5, and the failure is destructive.**
+Both paths are broken, and the proxy's dialect injection makes it worse:
 
-> **Testing caution.** The on-device model drops out intermittently under repeated
-> load with `com.apple.SensitiveContentAnalysisML error 15` or
-> `LanguageModelError error -1`, and sometimes just hangs. These are transient and
-> must never be read as a verdict about a feature. Re-run a control case that is
-> known to pass before you trust any negative result. An early Beta 5 run wrongly
-> suggested that object `title` caused a hang; a paced re-run with retries showed it
-> passes. Pace requests and retry only the transient failures.
+| Schema sent to `fm serve` | Beta 5 result |
+|---|---|
+| `$defs` **without** the dialect | fast `400 "Key 'x-order' not found ... Path: $defs.Person"` — same as Beta 4 |
+| `$defs` **with** the dialect (what the proxy injects) | **hangs forever**, then poisons the server |
+| flat or inline-nested object | works normally |
+
+The hang is not a slow generation. After one hung `$defs` request, `fm serve` never
+recovers: the next requests time out, then fail with
+`com.apple.SensitiveContentAnalysisML error 15`, until the server is restarted.
+Isolated with controls on a freshly restarted server — a flat control passes in
+~2.5 s, a `$defs` request hangs at 40 s, and the same control then fails; five
+consecutive flat requests pass (0.6–3.8 s) with no `$defs` in the run, so
+repetition alone is not the cause. Much of what looked like general "model
+flakiness" earlier in this audit was this poisoning.
+
+Consequence: the proxy's `fixResponseFormatSchema` turns a fast, honest 400 into an
+indefinite hang plus a dead server. Do not use `$defs`/`$ref` `response_format` on
+Beta 5 — flatten the schema inline instead. Recheck on the next beta before trusting
+the injector again.
+
+Unchanged from Beta 4: PCC still requires Terminal.app (same 503); a missing
+`tool.description` still 400s the whole request; streaming usage still arrives via
+`stream_options.include_usage`.
+
+> **Testing caution.** Once `fm serve` is poisoned (see `$defs` above), every later
+> request fails with `com.apple.SensitiveContentAnalysisML error 15`,
+> `LanguageModelError error -1`, or a hang — regardless of what you are testing.
+> Those errors are a property of the server's state, not a verdict about the feature
+> under test. Restart `fm serve` and re-run a control that is known to pass before you
+> trust any negative result. An early Beta 5 run wrongly concluded that object `title`
+> caused a hang; it passes on a clean server.
 
 ### Known limits
 
