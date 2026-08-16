@@ -348,6 +348,25 @@ Unchanged from Beta 4: PCC still requires Terminal.app (same 503); a missing
   Apple logo character. `--provider $' FM' --model pcc`; a plain `FM/pcc` will
   not match.
 
+**The 4096-token `system` window is the real constraint for agent clients.** Every
+feature works on the on-device model, but only if the whole request fits in 4096
+tokens. Through the raw API that is easy — a plain turn frames to 57 tokens, and the
+1024px travel-poster test image to 195. Through Pi it is not: Pi's built-in tools alone
+frame to ~11k (`Content contains 11176 tokens, which exceeds the maximum allowed
+context size of 4096`), and even `-nt` with a one-line `--system-prompt` still
+overflows. The same image and question succeed on `pcc` (32k) through Pi, and on
+`system` through the API. So `system` + an agent client is impractical; `system` + a
+thin client is fine.
+
+Passing an image to Pi uses `@path`: `pi ... @/tmp/poster.png "What does this say?"`
+(its own help shows `pi @prompt.md @image.png "What color is the sky?"`). Note `@path`
+is a separate argv entry — folding it into the `-p` string makes Pi read the whole
+string as a filename.
+
+**Feature sweep on the on-device `system` model (12 checks, through the proxy):**
+identical to the sweep below — 11 pass, only tool calling fails. Vision answered the
+poster correctly ("Anchorage, Alaska") at 195 prompt tokens.
+
 **Proxy feature sweep on Beta 5 (through the proxy, 12 checks):** non-streaming chat,
 streaming chat, streaming usage relay, `stream`-omitted → JSON, structured output with
 `$defs`, missing-description backfill, vision (`image_url`), CORS preflight,
