@@ -276,7 +276,7 @@ All items verified live against `fm serve` on the `system` engine.
 | **`stream` default** | A chat request that **omits** `stream` now returns `text/event-stream`. Only an explicit `stream:false` returns JSON. Breaks every OpenAI SDK that omits the field. | Send an explicit `stream:false` upstream when the client did not ask to stream. |
 | **`count-tokens` modes** | A bare prompt counts raw tokens only ("hello world" = 3, was 11). With `-i` it matches `fm serve`'s `prompt_tokens` **exactly** (0 diff at instruction lengths 11–300). Without `-i` it sits a flat **54** low (measured at prompt lengths 6–400). | `countPromptTokens` adds `CONVERSATION_FRAMING` (54) only when there is no system message. |
 | **Forced `tool_choice`** | The `system` engine now rejects it with a clean 500 `"An unsupported generation guide was used."` in ~140 ms, instead of Beta 3/4's `LanguageModelError -1`. | New non-retryable `classifyError` branch. The new wording matched nothing, so it fell through to the retryable default and burned the whole backoff ladder. |
-| **Tool calling** | **Broken upstream.** `tool_calls` is always `null`, `finish_reason:"stop"`, and raw control tokens leak into content (`"<ctrl46>get_time<ctrl46>"`). The model emits the call; `fm serve`'s parser does not read it. Reproduced direct and through the proxy, streaming and non-streaming. | None possible. Documented in the README. |
+| **Tool calling** | **Broken upstream, on BOTH engines.** `tool_calls` is always `null` with `finish_reason:"stop"`. On `system` raw control tokens leak into content (`"<ctrl46>get_time<ctrl46>"`); on `pcc` the content is empty. The model emits the call; `fm serve`'s parser does not read it. Reproduced direct and through the proxy, streaming and non-streaming. | None possible. Documented in the README. |
 | **String `title`** | A string property carrying `title` is now a "named string type" and 400s with `"Named string types must have a non-empty enum field"`. Object `title` is still fine. | None needed — `decorateDialect` only titles object schemas, never strings. |
 
 **`$defs` structured output is unusable in Beta 5, and the failure is destructive.**
@@ -301,6 +301,25 @@ Consequence: the proxy's `fixResponseFormatSchema` turns a fast, honest 400 into
 indefinite hang plus a dead server. Do not use `$defs`/`$ref` `response_format` on
 Beta 5 — flatten the schema inline instead. Recheck on the next beta before trusting
 the injector again.
+
+**PCC results (Beta 5, `fm serve` foreground in Terminal.app, 2026-08-15):**
+
+| Test | PCC result | vs `system` |
+|---|---|---|
+| PCC attach | OK | Terminal.app still required, still works |
+| Tool calling | **BROKEN** — `tool_calls: null`, `content: ""`, 200 with 1 output token | also broken, so the break is **server-wide**, not engine-specific |
+| `tool_choice:"required"` | **accepted** | still crashes `system` only — unchanged from Beta 3/4 |
+| Structured output, flat schema | OK (`{"age": 36, "name": "Ada"}`) | same |
+| Structured output, `$defs` | fast `500 "The model's safety guardrails were triggered."` (1.1 s) | **the hang + server poisoning is `system`-only** |
+
+Two things follow. First, the tool-call break is not something a model switch works
+around — both engines are affected, though the symptom differs: `system` leaks raw
+control tokens into content, PCC returns an empty completion. Second, `$defs` fails
+on PCC in a *misleading* way: `classifyError` maps "guardrail" to
+`finish_reason:"content_filter"` and keeps the partial output, so a `$defs` request
+on PCC comes back as an empty, apparently-filtered completion rather than the schema
+error it really is. The guardrail message is upstream's, not ours — but do not read
+it as a content problem.
 
 Unchanged from Beta 4: PCC still requires Terminal.app (same 503); a missing
 `tool.description` still 400s the whole request; streaming usage still arrives via

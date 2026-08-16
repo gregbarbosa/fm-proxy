@@ -42,8 +42,10 @@ on-device (`system`) and on Apple's Private Cloud Compute (`pcc`). It includes a
 > tokens into the message content (for example
 > `"<ctrl46>get_time<ctrl46>"`). The model still emits the call correctly — the
 > parser in `fm serve` does not read it. This happens with or without the proxy,
-> on streaming and non-streaming requests, so `fm-proxy` cannot repair it. Tool
-> calling works again if you stay on Beta 4. Verified on the `system` engine.
+> on streaming and non-streaming requests, so `fm-proxy` cannot repair it.
+> **Both engines are affected** — `pcc` returns an empty completion instead of
+> leaked tokens, so switching model does not work around it. Tool calling works
+> again if you stay on Beta 4.
 
 > [!WARNING]
 > **`$defs` structured output hangs on Beta 5, and takes the server down with it.**
@@ -53,6 +55,11 @@ on-device (`system`) and on Apple's Private Cloud Compute (`pcc`). It includes a
 > proxy's dialect injection is what triggers the hang; without it the same schema
 > gets a fast, honest `400`. Flatten your schema inline on Beta 5. Flat and
 > inline-nested schemas work normally.
+>
+> The hang is `system`-only. On `pcc` the same schema fails in ~1s with a
+> *safety-guardrail* error, which the proxy reports as
+> `finish_reason:"content_filter"` with empty content. That is upstream mislabelling
+> a schema problem — do not read it as a content problem.
 
 ## What it includes
 
