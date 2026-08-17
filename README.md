@@ -1,146 +1,105 @@
 # fm-proxy
 
+An OpenAI-compatible endpoint for Apple's Foundation Models CLI. Point any OpenAI
+client at `http://127.0.0.1:1977/v1` and use Apple's on-device and Private Cloud
+Compute models without code changes.
+
+macOS 27 ships `fm serve`, which already speaks Chat Completions. It also departs from
+the OpenAI specification in ways that break ordinary clients. `fm-proxy` sits in front
+of it and corrects those departures.
+
 > [!CAUTION]
-> ## Read this before you use `fm-proxy`
+> **Read the licence before you use this.**
 >
-> macOS 27.0 **Beta 5** (`fm` 2.0.68) added a legal notice that you must accept
-> before the `fm` CLI runs at all. Run `sudo fm license` to see it. It says:
+> macOS 27.0 Beta 5 added a legal notice. You must accept it before `fm` runs at all.
+> Run `sudo fm license` to read it. It says:
 >
-> > BY USING THE APPLE FOUNDATION MODELS CLI, YOU ARE AGREEING TO BE BOUND BY THE
-> > TERMS OF THE APPLICABLE SOFTWARE LICENSE AGREEMENT FOR macOS AT
-> > https://www.apple.com/legal/sla/. **YOU ARE ALSO AGREEING TO NOT
-> > PROGRAMMATICALLY ACCESS OR USE APPLE MODELS THROUGH APPLE SOFTWARE OR
-> > SERVICES EXCEPT AS EXPRESSLY PERMITTED.**
+> > YOU ARE ALSO AGREEING TO NOT PROGRAMMATICALLY ACCESS OR USE APPLE MODELS THROUGH
+> > APPLE SOFTWARE OR SERVICES EXCEPT AS EXPRESSLY PERMITTED.
 >
-> **`fm-proxy` programmatically accesses Apple models.** That is its only
-> function. Apple does not publish a list of permitted uses, so we cannot show
-> that this tool is inside the exception. Read plainly, this tool conflicts with
-> the terms you accept when you run `sudo fm license`.
+> `fm-proxy` accesses Apple models programmatically. That is its only function. Apple
+> does not publish the list of permitted uses, so I cannot show that this tool is
+> inside the exception. Read plainly, this tool conflicts with the terms that you
+> accept.
 >
-> **Use `fm-proxy` at your own risk.** You accept the license, so the decision and
-> the consequences are yours. Do not use this tool in a product, in a commercial
-> deployment, or anywhere the terms apply to more than you. If you want the
-> supported path, use the [Foundation Models framework][fmf] from a signed app.
->
-> This notice appeared in Beta 5. Earlier betas had no equivalent clause.
+> Use `fm-proxy` at your own risk. Keep it on your own machine. Do not put it in a
+> product or a commercial deployment. For a supported path, use the
+> [Foundation Models framework][fmf] in a signed app.
 
 [fmf]: https://developer.apple.com/documentation/foundationmodels
 
-**An OpenAI-compatible API endpoint for the Apple Foundation Models CLI (`fm`).**
+## State on Beta 5
 
-macOS 27.0 ships a beta `fm` CLI to run Apple Foundation Models
-on-device (`system`) and on Apple's Private Cloud Compute (`pcc`). It includes a Chat Completions local server (`fm serve`), but it departs from the OpenAI spec in ways that break ordinary clients: it streams when you did not ask it to, it rejects schema shapes every generator emits, and it reports streaming token usage only behind an opt-in flag most clients never set.
+`fm` 2.0.68, macOS build 26A5406e. I test each feature against a live `fm serve`.
 
-`fm-proxy` sits in front of `fm serve` to give you an **OpenAI-compatible Chat Completions endpoint**. Point any OpenAI client at the local URL and use Apple's models with no code changes.
-
-> ⚠️ **Beta.** This is built on macOS 27.0 **beta** so expect breaking changes with system updates.
+| Feature | State |
+|---|---|
+| Chat completions, streaming and not | Works |
+| Token usage, both paths | Works |
+| Structured output, including `$defs`/`$ref` | Works |
+| Images | Works |
+| CORS, `GET /v1/models`, `GET /health` | Works |
+| Typed errors | Works |
+| **Tool / function calling** | **Broken upstream. See the warning below.** |
 
 > [!WARNING]
-> **Tool calling is broken in Beta 5 (`fm` 2.0.68), upstream.** `fm serve` no
-> longer converts the model's tool call into a `tool_calls` field. It returns
-> `tool_calls: null` with `finish_reason: "stop"`, and leaks the raw control
-> tokens into the message content (for example
-> `"<ctrl46>get_time<ctrl46>"`). The model still emits the call correctly — the
-> parser in `fm serve` does not read it. This happens with or without the proxy,
-> on streaming and non-streaming requests, so `fm-proxy` cannot repair it.
-> **Both engines are affected** — `pcc` returns an empty completion instead of
-> leaked tokens, so switching model does not work around it. Tool calling works
-> again if you stay on Beta 4.
+> **Tool calling is broken in Beta 5, and it fails silently.**
 >
-> **This fails silently and produces wrong answers.** Asked to read a file
-> containing `BETA5_CANARY_9F3A`, the model emitted a correct tool call, `fm serve`
-> failed to parse it, and the model then answered that the file contained `hello`.
-> The tool never ran. A client gets a confident, fabricated result rather than an
-> error. Do not use tool calling on Beta 5 for anything you intend to trust.
+> `fm serve` no longer converts the model's tool call into a `tool_calls` field. Both
+> the on-device and the cloud model are affected, so a different model is not a way
+> around it.
+>
+> The model then answers as if it had called the tool. I asked it to read a file that
+> contained `BETA5_CANARY_9F3A`. The tool never ran, and the model reported the
+> contents as `hello`. A client receives a confident wrong answer, not an error.
+>
+> Do not use tool calling for work that you must trust. Wait for Apple to fix the
+> parser. The proxy still repairs tool schemas, so tool calling returns without a
+> change here once `fm serve` reads the call again.
 
-> [!NOTE]
-> **`$defs` schemas break `fm serve` on Beta 5 — the proxy works around it.** Sent
-> straight to `fm serve`, a `response_format` schema using `$defs`/`$ref` either 400s
-> (no dialect) or, with the dialect Beta 3/4 required, **hangs forever and leaves the
-> server unable to answer anything until it is restarted**. The proxy now inlines
-> `$ref`s and drops `$defs` entirely, so your schema reaches `fm serve` as plain
-> inline nesting, which it handles fine. Verified on Beta 5: 3/3 in ~1.2s on
-> `system` and `pcc`, with no poisoning. Use the proxy for `$defs` schemas; do not
-> hand them to `fm serve` yourself.
-
-## What it includes
-
-- **Chat completions** — streaming and non-streaming.
-- **Tool / function calling — currently unusable on Beta 5, see the warning above.** The
-  proxy still accepts standard OpenAI `tools` and repairs the schemas (it backfills a
-  missing `description`, which `fm serve` 400s on, and round-trips the one shape verified
-  broken upstream, `array<array<object>>`). But `fm serve` no longer turns the model's
-  tool call into `tool_calls`, so none of that reaches a client today. The schema repairs
-  are kept, and covered by tests, so the feature returns the moment Apple fixes the
-  parser — but they cannot be re-verified end-to-end until then.
-- **Fixed structured output** — `response_format: {type:"json_schema",...}` works with plain, undecorated OpenAI/pydantic-style schemas, including the `$defs`/`$ref` shape virtually every real schema generator emits. `fm serve` cannot handle `$defs` on Beta 5 at all (400 without its dialect, an indefinite hang with it), so the proxy resolves the `$ref`s inline and drops `$defs` before forwarding. The result is plain inline nesting, which `fm serve` handles natively and which needs no dialect keys. Self-referencing schemas cannot be inlined, so those fall back to the dialect.
-- **Corrected non-streaming default** — Beta 5 returns `text/event-stream` for a chat
-  request that omits `stream`, where the OpenAI spec (and every earlier build) returns
-  one JSON object. Most OpenAI SDKs omit the field, so they got a body they could not
-  parse. The proxy sends an explicit `stream:false` upstream when the client did not
-  ask to stream, which restores the documented behaviour.
-- **Fixed token counts** — `fm serve`'s non-streaming responses report real `prompt_tokens` and are passed through untouched. The proxy corrects the streaming path and the gauge: on Beta 5 `fm count-tokens` drops the conversation framing when no system message is present, landing a flat 54 tokens low, which the proxy adds back. Streaming responses only get real usage when the request opts in via `stream_options.include_usage:true`, which real clients rarely set, so the proxy forces that flag upstream on every streaming request and relays fm serve's own real usage back — falling back to a computed estimate only if an upstream ignores the flag entirely.
-- **Throughput counter** — every completion logs a one-line `[toks]` report (`out=… dur=… ttft=… => N.N tok/s`). Not gated behind `--verbose`, so it shows in quiet mode; this is the per-request generation-speed counter.
-- **Added vision support** — standard `image_url` content parts with base64 data URLs.
-- **Enabled CORS** — Browser-based clients can connect directly.
-- **OpenAI-shaped errors** — failures come back typed (`rate_limit_exceeded`, `service_unavailable`) so clients can branch on the cause. A mid-stream safety filter abort ends the completion as `finish_reason:"content_filter"` with any partial output preserved (no exception thrown).
-
-Includes the native `GET /v1/models` and `GET /health` endpoints as straight passthroughs to `fm serve`.
+`n > 1` and `parallel_tool_calls` are accepted and then ignored by `fm serve`. Sampling
+parameters pass through unchanged.
 
 ## Requirements
 
-- **You must accept the CLI license first.** On Beta 5 and later, run `sudo fm license`
-  and answer `yes`. Until you do, every `fm` subcommand exits 69 and the proxy falls
-  back to estimated token counts. The acceptance applies to every user on the machine.
-  Read the caution at the top of this file before you accept.
-- **macOS 27.0 Beta 5** (fm/FoundationModels **2.0.68**; ships with the `fm` CLI baked in).
-  This targets Beta 5 only. Earlier betas are no longer supported, and the compatibility
-  fallbacks they needed have been removed — the token counter no longer probes the
-  pre-Beta-4 `token-count` name, and the error classifier no longer reads a forced
-  `tool_choice` crash out of Beta 3/4's `LanguageModelError -1`. On an older build the
-  proxy will still run, but token counts fall back to estimates and the forced
-  `tool_choice` rejection is retried instead of failing fast. Check your build with
-  `otool -l /usr/bin/fm | grep -A2 LC_SOURCE_VERSION` (see `AGENTS.md` for the full
-  fingerprinting recipe).
-- **Signed in with your Apple Account** and Apple Intelligence enabled.
-  - The `pcc` model runs on Private Cloud Compute and needs that you to be signed in.
-  - The `system` model is available locally.
-- **Node.js** (v18+). The proxy uses only Node's standard library, no `npm install`.
+- macOS 27.0 Beta 5, which includes `fm` 2.0.68. Earlier betas are not supported.
+- An Apple Account, signed in, with Apple Intelligence enabled. The `pcc` model needs
+  it. The `system` model runs locally.
+- Node.js 18 or later. The proxy uses only the standard library.
+- The accepted CLI licence. Run `sudo fm license` and answer `yes`. Until you do, every
+  `fm` command exits 69. One acceptance covers every user on the machine.
 
-## Quick start
-
-Starts the proxy, then runs `fm serve` in the foreground:
+## Start it
 
 ```bash
 ./fm-launch.sh
 ```
 
-When it prints `stack up — OpenAI base URL: http://127.0.0.1:1977/v1`, you're good to go.
+Wait for `stack up — OpenAI base URL: http://127.0.0.1:1977/v1`.
 
-> **fm serve must run in the foreground, inside Terminal.app specifically.** macOS only grants PCC (Private Cloud Compute) attribution to a foreground `fm serve` hosted by the real Terminal app; other terminal emulators' panes are refused with `"Please use the Terminal app"` (HTTP 503). Backgrounding it, under node, or with a shell `&` also strips attribution. Still true on Beta 5, re-verified. `system` keeps working in every context.
+The launcher runs `fm serve` in the foreground and the proxy as a background child.
+Press Ctrl-C to stop both. Do not press Ctrl-Z: a suspended `fm serve` keeps the port.
+
+> [!IMPORTANT]
+> **The `pcc` model needs `fm serve` in the foreground of Terminal.app.**
 >
-> The launcher runs `fm serve` in the foreground (blocking the terminal it was launched in) and the proxy as
-> a backgrounded child. **Use Ctrl-C to stop** (it reaps the proxy); don't Ctrl-Z — a
-> suspended `fm serve` won't be cleaned up and will strand the port.
+> macOS grants Private Cloud Compute attribution only to a foreground `fm serve` that
+> Terminal.app hosts. Another terminal application receives HTTP 503 and
+> `"Please use the Terminal app"`. A background process loses attribution too. The
+> `system` model works everywhere.
 
-## Connecting to the endpoint
-
-Point any OpenAI client at:
-
-- **Base URL:** `http://127.0.0.1:1977/v1`
-- **API key:** (required but ignored) use any dummy key (ex: `sk-7777777`)
-- **Models:**
-  - `system` (on-device)
-  - `pcc` (Private Cloud Compute).
-
-### Examples
+To run the two processes yourself, in two Terminal.app windows:
 
 ```bash
-curl http://127.0.0.1:1977/v1/chat/completions \
-  -H "Authorization: Bearer sk-local" \
-  -H "Content-Type: application/json" \
-  -d '{"model":"pcc","messages":[{"role":"user","content":"Say hello in one word."}]}'
+/usr/bin/fm serve --port 1976   # Apple's engine, foreground
+node fm-proxy.js                # the proxy, :1977 -> :1976
 ```
+
+## Connect a client
+
+- Base URL: `http://127.0.0.1:1977/v1`
+- API key: any value. The proxy requires one and ignores it.
+- Models: `system` (on-device), `pcc` (Private Cloud Compute)
 
 ```python
 from openai import OpenAI
@@ -151,81 +110,53 @@ print(client.chat.completions.create(
 ).choices[0].message.content)
 ```
 
-## Running it manually
+## Options
 
-If you'd rather run the two processes yourself:
-
-```bash
-/usr/bin/fm serve --port 1976   # Apple's engine  (keep it in the FOREGROUND — see below)
-node fm-proxy.js                # the proxy (listens on :1977 → :1976)
 ```
-
-Run `fm serve` in its own Terminal.app window, in the foreground. Backgrounding it, running it under another process, or hosting it in a non-Terminal terminal emulator loses attribution and `pcc` will return 503 errors. `fm-proxy` handles this for you automatically. Running it in this manual form is the same thing, just split across two terminals.
-
-## Usage
-
-```bash
 ./fm-launch.sh [options]
-  -v, --verbose          show the proxy's per-request [assembled] telemetry (errors/warnings and the [toks] throughput counter are always shown, even without this)
+  -v, --verbose          show per-request [assembled] telemetry
   --fm-port <n>          fm serve port          (default 1976)
-  --proxy-port <n>       proxy port clients use (default 1977)
+  --proxy-port <n>       proxy port for clients (default 1977)
   --fm-bin <path>        fm binary              (default /usr/bin/fm)
-  --health-timeout <ms>  how long to wait for fm serve (default 20000)
-  -h, --help
+  --health-timeout <ms>  wait for fm serve      (default 20000)
 ```
 
-`FM_PORT` and `PROXY_PORT` env vars are also accepted as alternatives to `--fm-port` / `--proxy-port`.
-## Tests
+`FM_PORT` and `PROXY_PORT` replace the two port options. Errors and the `[toks]`
+throughput counter print without `--verbose`.
 
-```bash
-node --test
-```
+Run the tests with `node --test`.
 
-## Status & caveats
+## What the proxy corrects
 
-**Consider this an experimental beta, and not deeply tested**:
+Each item below is a live-verified `fm serve` behaviour that breaks OpenAI clients.
 
-What `fm serve` gets wrong on Beta 5, and what the proxy can do about it:
-
-| What | State |
+| `fm serve` behaviour | Correction |
 |---|---|
-| Tool / function calling | **Broken.** Both engines. Fails silently and fabricates answers — see the warning at the top. Not fixable here. |
-| `$defs` structured output | Broken upstream; the proxy works around it by inlining `$ref`s. |
-| `n > 1` | Ignored — `fm serve` returns a single completion. |
-| `parallel_tool_calls` | Ignored entirely, whether `true`, `false`, or absent. The proxy passes every `tool_call` through rather than guessing which to keep (see `AGENTS.md`). |
-| Sampling params | Passed through as-is; whatever `fm serve` supports applies. |
+| A request that omits `stream` returns an event stream, not one JSON object. | Sends `stream:false` when the client did not ask to stream. |
+| A `$defs`/`$ref` schema returns 400. With the dialect it demanded before Beta 5, it hangs and stops answering until restart. | Resolves the references inline and removes `$defs`. |
+| A tool whose `function.description` is absent returns 400 for the whole request. | Fills in an empty description. |
+| Streaming usage arrives only when the request sets `stream_options.include_usage`. | Sets the flag upstream and relays the real numbers. |
+| A bare `fm count-tokens` omits the conversation framing, so a count reads 54 low. | Adds the framing back. |
+| A forced `tool_choice` fails permanently on `system`, with a message that reads like a rate limit. | Types it as terminal, so it fails in ~150 ms instead of retrying. |
+| A tool parameter that uses `$ref` loses its structure. | Resolves the references before simplifying. |
+| One nested shape, `array<array<object>>`, cannot be decoded. | Passes it as a JSON string and parses the reply. |
 
-Everything else was swept against Beta 5 and works, on both the on-device and cloud
-models: chat (streaming and not), usage reporting, structured output, images, CORS,
-both GET endpoints, and typed errors.
+Apple's error messages are generic, so the proxy gives each one a type. A safety stop
+becomes `finish_reason:"content_filter"` and keeps the partial output. A rate limit
+becomes `rate_limit_exceeded`, and the proxy retries it. Missing PCC attribution becomes
+`service_unavailable`.
 
-Two tool-schema repairs remain in place but cannot be re-verified end-to-end while
-tool calling is broken — the `array<array<object>>` round-trip and the backfill of a
-missing `function.description`. Both stay covered by unit tests.
+`fm serve` is beta software. Its behaviour changes between builds, so expect to update
+the proxy.
 
-I've seen **distinct mid-stream failure modes** on `pcc`: 
-  - The model emits valid output, then `fm serve` interrupts with a safety-guardrail abort (surfaces as `finish_reason:"content_filter"`)
-  - Random transient rate-limiting (`fm-proxy` has built-in retries, and surfaces `rate_limit_exceeded`)
-  - When PCC attribution is missing (e.g. `fm serve` got backgrounded), a `service_unavailable` 503. 
-  
-Exactly what triggers each is **unverified**. Apple's error messaging is generic, and these are what I've been able to deduce after testing. The proxy classifies the errors so clients can react appropriately instead of guessing or erroring out.
+## Files
 
-Because `fm serve` is **part of macOS 27.0 beta**, its request/response behavior, schema support, and error semantics may change between builds. Which can change how this proxy works. Expect to update the proxy as the betas evolve.
-
-See [`AGENTS.md`](AGENTS.md) for the deeper technical notes (schema flattening,
-token accounting, the PCC context ceiling, and the structured-output situation).
-
-## Repository layout
-
-| Path | What |
+| Path | Contents |
 |---|---|
-| `fm-proxy.js` | The proxy (the app). |
-| `fm-launch.sh` | One-command launcher — runs `fm serve` foreground (required for PCC) + the proxy. |
-| `fm-proxy.test.js` | Unit + integration tests. |
-| `AGENTS.md` | Deep technical notes / runbook. |
-| `docs/` | `fm` CLI reference and PCC findings. |
-| `tools/` | Local dev utilities, **not tracked in git** (see `.gitignore`) — e.g. `gen-fm-docs.py`, which regenerates `docs/fm-reference.md` from the installed binary. |
-
-## License
+| `fm-proxy.js` | The proxy. |
+| `fm-launch.sh` | Launcher for `fm serve` and the proxy. |
+| `fm-proxy.test.js` | Unit and integration tests. |
+| `AGENTS.md` | Technical notes: token accounting, the PCC context ceiling, per-beta findings. |
+| `docs/fm-reference.md` | Generated `fm` CLI reference. |
 
 [MIT](LICENSE).
