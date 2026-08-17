@@ -185,18 +185,23 @@ node --test
 
 **Consider this an experimental beta, and not deeply tested**:
 
-Known broken upstream on Beta 5, and not fixable from the proxy:
+What `fm serve` gets wrong on Beta 5, and what the proxy can do about it:
 
 | What | State |
 |---|---|
-| Tool / function calling | Broken on both `system` and `pcc`. Fails silently and fabricates answers — see the warning at the top. |
-| `$defs` structured output | Broken in `fm serve`; the proxy works around it by inlining `$ref`s. |
-| `n > 1` | Ignored; `fm serve` returns a single completion. |
-| `parallel_tool_calls` | Ignored entirely, whether `true`, `false`, or absent. |
+| Tool / function calling | **Broken.** Both engines. Fails silently and fabricates answers — see the warning at the top. Not fixable here. |
+| `$defs` structured output | Broken upstream; the proxy works around it by inlining `$ref`s. |
+| `n > 1` | Ignored — `fm serve` returns a single completion. |
+| `parallel_tool_calls` | Ignored entirely, whether `true`, `false`, or absent. The proxy passes every `tool_call` through rather than guessing which to keep (see `AGENTS.md`). |
+| Sampling params | Passed through as-is; whatever `fm serve` supports applies. |
 
-Everything else was swept against Beta 5 and works: chat (streaming and not), usage
-reporting, structured output, images, CORS, both GET endpoints, and typed errors.
+Everything else was swept against Beta 5 and works, on both the on-device and cloud
+models: chat (streaming and not), usage reporting, structured output, images, CORS,
+both GET endpoints, and typed errors.
 
+Two tool-schema repairs remain in place but cannot be re-verified end-to-end while
+tool calling is broken — the `array<array<object>>` round-trip and the backfill of a
+missing `function.description`. Both stay covered by unit tests.
 
 I've seen **distinct mid-stream failure modes** on `pcc`: 
   - The model emits valid output, then `fm serve` interrupts with a safety-guardrail abort (surfaces as `finish_reason:"content_filter"`)
@@ -206,8 +211,6 @@ I've seen **distinct mid-stream failure modes** on `pcc`:
 Exactly what triggers each is **unverified**. Apple's error messaging is generic, and these are what I've been able to deduce after testing. The proxy classifies the errors so clients can react appropriately instead of guessing or erroring out.
 
 Because `fm serve` is **part of macOS 27.0 beta**, its request/response behavior, schema support, and error semantics may change between builds. Which can change how this proxy works. Expect to update the proxy as the betas evolve.
-
-**Known limits**: `n > 1` isn't supported; `parallel_tool_calls: false` is accepted but silently ignored by `fm serve` (the proxy passes every `tool_call` through rather than guessing which one to keep — see `AGENTS.md`); sampling parameters are passed through as-is. Two tool-schema repairs are still in place but cannot be re-verified end-to-end while Beta 5's tool calling is broken: the `array<array<object>>` JSON-string round-trip (last verified on Beta 4, where the native shape hard-errors), and the backfill of a missing `function.description`, which `fm serve` 400s on. Both remain covered by unit tests.
 
 See [`AGENTS.md`](AGENTS.md) for the deeper technical notes (schema flattening,
 token accounting, the PCC context ceiling, and the structured-output situation).
@@ -221,7 +224,7 @@ token accounting, the PCC context ceiling, and the structured-output situation).
 | `fm-proxy.test.js` | Unit + integration tests. |
 | `AGENTS.md` | Deep technical notes / runbook. |
 | `docs/` | `fm` CLI reference and PCC findings. |
-| `tools/` | Dev utilities — `gen-fm-docs.py` regenerates `docs/fm-reference.md` from the installed binary. |
+| `tools/` | Local dev utilities, **not tracked in git** (see `.gitignore`) — e.g. `gen-fm-docs.py`, which regenerates `docs/fm-reference.md` from the installed binary. |
 
 ## License
 

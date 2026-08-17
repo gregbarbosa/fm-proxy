@@ -6,14 +6,12 @@
 //   - No anyOf, allOf, oneOf, if/then/else, not, patternProperties
 //   - enum, minimum, maximum, additionalProperties are OK
 //   - arrays of primitives are OK
-//   - Nested objects and array<object> now decode natively (macOS 27 Beta 3 / fm
-//     2.0.59 fixed the GenerationSchema `duplicateType` bug that used to block every
-//     nested object). Verified live: object-in-object (chain depth 2), array<object>,
-//     and object -> array -> object all decode correctly. Two shapes are STILL
-//     broken and still need the JSON-string round-trip below: array<array<object>>
-//     (2+ consecutive array wrappers landing on an object), and a chain of 3+
-//     directly-nested object types (object -> object -> object). See
-//     needsJsonRoundTrip.
+//   - Nested objects decode natively at any depth, as do array<object> and
+//     object -> array -> object. ONE shape still needs the JSON-string round-trip
+//     below: array<array<object>>, an object reached through 2+ consecutive array
+//     wrappers. See needsJsonRoundTrip.
+//   - $ref/$defs are resolved inline before simplifying (both tool parameters and
+//     response_format), since fm serve understands neither.
 //
 // This proxy simplifies tool schemas to work within these limits.
 //
@@ -53,28 +51,30 @@ const RETRY_BASE_MS = Number(process.env.FM_RETRY_BASE_MS ?? 1000);
 const RETRY_CAP_MS = Number(process.env.FM_RETRY_CAP_MS ?? 15000);
 
 // ── Token counting ───────────────────────────────────────────────────────────
-// Apple's `fm serve` used to report prompt_tokens as always 0 on non-streaming
-// responses; that's fixed as of macOS 27 Beta 3 (fm 2.0.59) — verified live against
-// `fm count-tokens`, non-streaming usage is now passed through untouched (see the
-// non-streaming response handler). Streaming still sends NO usage at all (also
-// verified live, still broken), so Pi's context gauge would sit at ~0% there without
-// repair — this section still synthesizes usage for the streaming path only.
+// fm serve reports real usage on both paths now, and the proxy relays it: verbatim on
+// the non-streaming path, and on the streaming path by forcing
+// `stream_options.include_usage` upstream (see the request handler). The counters here
+// are therefore only a FALLBACK, used when fm serve sends no usage at all and for the
+// assembled-size instrumentation below.
 //
-// Strategy (hybrid): exact count for the prompt (the big, stable number) via
-// Apple's own `fm count-tokens`; cheap heuristic for the streamed completion.
-//
-// Calibration (measured against `fm count-tokens`):
-//   per-turn chat-template overhead ≈ 9 tokens; content ≈ chars / 4.4.
-const PER_TURN_OVERHEAD = 9;
+// Strategy: exact counts from Apple's own `fm count-tokens` where possible, with a
+// chars/4.4 heuristic when the CLI is unavailable (e.g. the Beta 5 licence gate).
 const CHARS_PER_TOKEN = 4.4;
-// Beta 5 (fm 2.0.68) framing constant: the fixed cost fm serve adds around a whole
-// conversation, which `fm count-tokens` only includes when -i is passed. Measured
-// as a flat 54 across prompt lengths 6–400 chars. See countPromptTokens.
+// Two measured framing constants, each with one meaning:
+//   CONVERSATION_FRAMING — the fixed cost fm serve adds around a whole conversation,
+//     which `fm count-tokens` includes only when -i is passed. Flat 54 across prompt
+//     lengths 6–400 chars. See countPromptTokens.
+//   PER_MESSAGE_FRAMING — the extra cost of splitting the same text across turns,
+//     which a single joined count cannot see. Measured against fm serve at exactly 4
+//     per message beyond the first, linear from 1 to 7 messages (residual 0/8/16/24).
 const CONVERSATION_FRAMING = 54;
+const PER_MESSAGE_FRAMING = 4;
 
+// Content-only estimate. Framing is added by the caller that needs it, so this stays
+// correct for completions (never framed) as well as prompts.
 function estimateTokens(text) {
   if (!text) return 0;
-  return PER_TURN_OVERHEAD + Math.ceil(text.length / CHARS_PER_TOKEN);
+  return Math.ceil(text.length / CHARS_PER_TOKEN);
 }
 
 // Flatten an OpenAI messages array into the text Apple's model actually sees.
@@ -120,9 +120,10 @@ function _isLicenseGate(err) {
   return err?.status === 69 && /LEGAL NOTICE & TERMS/.test(text);
 }
 function fmTokenCount(text, instructions) {
-  // The count subcommand requires at least one input; skip the call entirely when
-  // both are empty (e.g. tool-only turns) — the count is just the per-turn overhead.
-  if (!text && !instructions) return PER_TURN_OVERHEAD;
+  // The count subcommand requires at least one input; skip the call entirely when both
+  // are empty (e.g. tool-only turns). There is no content, so the cost is framing
+  // alone, which countPromptTokens adds.
+  if (!text && !instructions) return 0;
   const key = (instructions || "") + "\0" + (text || "");
   if (_tokenCache.has(key)) return _tokenCache.get(key);
   if (_fmLicenseGated) return null;
@@ -165,7 +166,7 @@ function fmTokenCount(text, instructions) {
 function countPromptTokens(messages) {
   const { instructions, prompt } = splitMessages(messages);
   const n = fmTokenCount(prompt, instructions);
-  if (n == null) return estimateTokens(instructions + "\n" + prompt);
+  if (n == null) return CONVERSATION_FRAMING + estimateTokens(instructions + "\n" + prompt);
   // Beta 5 split the two counting modes apart. With -i, `count-tokens` applies the
   // full conversation framing and matches fm serve's prompt_tokens EXACTLY (verified
   // 0 diff at instruction lengths 11–300 chars). Without -i it counts raw prompt
@@ -212,7 +213,7 @@ function assembledTokenBreakdown(parsedReq, fixedBody) {
   // 4. per-turn template framing applied once per non-system turn (the gauge
   //    collapses this to a single overhead for the whole concatenated prompt).
   const nonSystemTurns = messages.filter((m) => m.role !== "system").length;
-  const perTurnExtra = PER_TURN_OVERHEAD * Math.max(0, nonSystemTurns - 1);
+  const perTurnExtra = PER_MESSAGE_FRAMING * Math.max(0, nonSystemTurns - 1);
   const assembledTotal = msgTokens + toolTokens + toolCallTokens + perTurnExtra;
   return { msgTokens, toolTokens, toolCallTokens, perTurnExtra,
            turns: nonSystemTurns, assembledTotal };
@@ -300,8 +301,8 @@ function simplifyProperty(prop) {
   // Nested objects decode natively now (see the header comment) — recurse rather
   // than collapsing to string. A bare `properties` block (no explicit type) is
   // still an object; normalize it to type:"object" so it survives unambiguously.
-  // Callers that hit one of the two still-broken shapes never reach here — they're
-  // caught by needsJsonRoundTrip before simplifyProperty is called.
+  // A param matching the one still-broken shape never reaches here — needsJsonRoundTrip
+  // catches it before simplifyProperty is called.
   if (prop.type === "object" || prop.properties) {
     const result = { type: "object", properties: {} };
     for (const [name, sub] of Object.entries(prop.properties || {})) {
@@ -342,17 +343,12 @@ function leafIsObjectThroughArrays(prop) {
   return prop.type === "object" || !!prop.properties;
 }
 
-// A top-level param needs the JSON-string round-trip only for the ONE shape
-// verified live against fm serve (Beta 4 / fm 2.0.62) to still be broken:
-//   An object reachable through 2+ consecutive array wrappers
-//   (array<array<object>> and deeper) — Beta 4 errors with
-//   "Failed to parse generated content" (Beta 3 silently omitted the
-//   argument). array<array<number>> (a primitive leaf) is fine.
-// Chains of 3+ directly-nested object types leaked internal `$defs` naming on
-// Beta 3 and were round-tripped then; Beta 4 decodes them correctly (verified
-// live, repeated trials, system + pcc, incl. a 4-level chain) so object
-// nesting to any depth now passes through natively and must NOT be
-// round-tripped.
+// A top-level param needs the JSON-string round-trip only for the ONE shape verified
+// broken upstream: an object reachable through 2+ consecutive array wrappers
+// (array<array<object>> and deeper), which errors "Failed to parse generated content".
+// array<array<number>> (a primitive leaf) is fine, and object nesting passes through
+// natively at any depth. Last verified end-to-end on Beta 4; Beta 5's tool-call parser
+// is broken upstream, so this cannot currently be re-checked live.
 function needsJsonRoundTrip(prop, arrayRun = 0) {
   if (!prop || typeof prop !== "object") return false;
   if (prop.type === "array") {
@@ -376,6 +372,14 @@ function fixToolSchema(schema) {
     result.properties = {};
     return { schema: result, jsonFields };
   }
+
+  // Resolve $refs first. simplifyProperty strips `$ref` and `$defs` as unsupported
+  // keywords, which silently flattened a referenced parameter to `{}` — an empty,
+  // typeless schema that fm serve is still told is required. pydantic's
+  // .model_json_schema() and zod-to-json-schema emit exactly that shape for any named
+  // type, so this hit real tool definitions. Inlining first gives the nesting fm serve
+  // decodes natively. Cyclic refs cannot be inlined and keep the old behaviour.
+  if (schema.$defs) schema = inlineDefs(schema) || schema;
 
   result.properties = {};
   for (const [name, prop] of Object.entries(schema.properties || {})) {
@@ -407,23 +411,20 @@ function fixToolSchema(schema) {
 }
 
 // ── response_format schema dialect (structured output) ──────────────────────
-// fm serve's response_format json_schema dialect (constrained decoding) requires
-// title + x-order (property order) + required + additionalProperties on every
-// object schema reached through `$defs` -- verified live (2026-07-06, fm 2.0.59):
-// a $defs entry (or any object nested inside one -- inline sub-properties, array
-// items -- recursively) missing any of these 400s with a DecodingError naming the
-// exact key (`keyNotFound 'x-order'`, "Object schemas require a 'title' key", a
-// missing 'required', a missing 'additionalProperties'). The TOP-LEVEL schema and
-// any object reached ONLY through inline `properties` nesting (never touching
-// $defs) need NONE of this -- verified live, flat and multi-level inline-nested
-// schemas decode with zero dialect keys. This corrects the earlier (2026-06-14)
-// finding, which only tested $ref/$defs-shaped schemas and concluded the dialect
-// was required "on every object level". Real schema generators (pydantic
-// `.model_json_schema()`, zod-to-json-schema, TypeBox, ...) virtually always emit
-// $defs/$ref for any named/reused type, so this gap breaks structured output for
-// real clients unless corrected here -- scoped narrowly to $defs (rather than
-// decorating every object unconditionally) to avoid needless token bloat on the
-// (dialect-free) inline portion of the schema.
+// LEGACY PATH. fm serve's constrained-decoding dialect requires title + x-order +
+// required + additionalProperties on every object schema reached through `$defs`;
+// without them it 400s with a DecodingError naming the exact missing key. Objects
+// reached only through inline `properties` nesting need none of it.
+//
+// The proxy no longer relies on this. fixResponseFormatSchema inlines the $refs and
+// drops $defs, which produces exactly the dialect-free inline shape fm serve is happy
+// with — and on Beta 5 the dialect is actively harmful, hanging the `system` engine
+// until the server is restarted. decorateDialect survives only as the fallback for a
+// cyclic or unresolvable $ref, which cannot be inlined.
+//
+// This matters because real schema generators (pydantic `.model_json_schema()`,
+// zod-to-json-schema, TypeBox) virtually always emit $defs/$ref for a named type, so
+// most real client schemas take the inlining path.
 function isDialectObjectSchema(s) {
   return !!(s && typeof s === "object" && (s.type === "object" || s.properties));
 }
@@ -726,14 +727,15 @@ const server = http.createServer((req, res) => {
       fixed = JSON.stringify(parsedReq);
     }
     // Compute the full assembled size fm serve actually frames (messages + tool
-    // schemas + assistant tool_calls + per-turn framing). This drives the
-    // instrumentation log, and is still the reported prompt_tokens for the
-    // streaming and guardrail-fallback paths (fm serve sends no real usage there).
-    // The normal non-streaming success path now trusts fm serve's own accurate
-    // prompt_tokens instead (see the non-streaming response handler) — this estimate
-    // reads ~4x low if it were used there, which is exactly what made the transcript
-    // blow past PCC's ~32k ceiling unwarned before fm serve's own number could be
-    // trusted. Set GAUGE_MODE=msgs to fall back to the old messages-only number.
+    // schemas + assistant tool_calls + per-message framing). Both success paths relay
+    // fm serve's OWN usage, so this is a fallback and an instrumentation aid: it is
+    // what gets reported when fm serve sends no usage at all (e.g. a guardrail abort
+    // that never reaches a clean finish), and it is logged on every request so a
+    // context-overflow can be tied to a real assembled size. The messages part now
+    // reproduces fm serve's prompt_tokens exactly (verified diff 0 at 1/3/5 messages,
+    // with and without a system prompt); the tool-schema part is still an estimate,
+    // since fm serve frames tools more heavily than their raw JSON. Set GAUGE_MODE=msgs
+    // for the messages-only number.
     let breakdown = null;
     if (isChat && parsedReq) {
       breakdown = assembledTokenBreakdown(parsedReq, fixed);
@@ -1015,9 +1017,8 @@ const server = http.createServer((req, res) => {
               // forced upstream via stream_options.include_usage) over the
               // completionText-based estimate — the same "trust fm serve's own
               // number" upgrade already applied to the non-streaming path. The
-              // estimate only fires as a fallback for upstreams that ignore the flag
-              // (e.g. pre-Beta-3 fm serve, or a guardrail abort that never reaches a
-              // clean finish).
+              // estimate only fires as a fallback when no usage frame arrives at all
+              // (e.g. a guardrail abort that never reaches a clean finish).
               const usage = realUsage || {
                 prompt_tokens: promptTokens,
                 completion_tokens: completionTokens,
