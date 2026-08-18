@@ -28,9 +28,13 @@ of it and corrects those departures.
 
 [fmf]: https://developer.apple.com/documentation/foundationmodels
 
-## State on Beta 5
+## State on Beta 5 and Beta 6
 
-`fm` 2.0.68, macOS build 26A5406e. I test each feature against a live `fm serve`.
+Tested on macOS 27.0 Beta 5 (`26A5406e`) and Beta 6 (`26A5416b`). Both ship `fm` 2.0.68.
+
+**Beta 6 changes nothing.** It ships the same `fm`, and the CLI surface is byte-identical.
+I re-ran every check against it and every result matched Beta 5, so this release needs no
+update. I test each feature against a live `fm serve`.
 
 | Feature | State |
 |---|---|
@@ -43,7 +47,7 @@ of it and corrects those departures.
 | **Tool / function calling** | **Broken upstream. See the warning below.** |
 
 > [!WARNING]
-> **Tool calling is broken in Beta 5, and it fails silently.**
+> **Tool calling is broken on Beta 5 and Beta 6, and it fails silently.**
 >
 > `fm serve` no longer converts the model's tool call into a `tool_calls` field. Both
 > the on-device and the cloud model are affected, so a different model is not a way
@@ -62,7 +66,7 @@ parameters pass through unchanged.
 
 ## Requirements
 
-- macOS 27.0 Beta 5, which includes `fm` 2.0.68. Earlier betas are not supported.
+- macOS 27.0 Beta 5 or Beta 6. Both include `fm` 2.0.68. Earlier betas are not supported.
 - An Apple Account, signed in, with Apple Intelligence enabled. The `pcc` model needs
   it. The `system` model runs locally.
 - Node.js 18 or later. The proxy uses only the standard library.
