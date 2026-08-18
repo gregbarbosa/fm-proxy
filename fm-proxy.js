@@ -27,38 +27,26 @@ const PROXY_PORT = Number(process.env.PROXY_PORT) || 1977;
 // NOT conflate — clients need to tell them apart because the remedy differs:
 //   1. Rate-limit / capacity: HTTP 200 then an error frame ("LanguageModelError -1"),
 //      rejecting at admission before any text. Transient; retry with backoff (below).
-//      PCC-only.
 //   2. Safety-guardrail abort: the model emits valid output, THEN fm serve interrupts
-//      ("The model's safety guardrails were triggered."). Deterministic + terminal +
-//      PCC-only — retrying the identical request re-fails at the identical point, so we
-//      do NOT retry; we surface it at once. Benign code triggers it, so it is NOT a
-//      judgment that the user's content is unsafe.
-//   3. Forced tool_choice on `system`: a request with `model:"system"` and
-//      `tool_choice:"required"` (or a specific function pin) is rejected by fm serve
-//      with "An unsupported generation guide was used." — deterministic and permanent
-//      (`pcc` accepts it fine), not transient, so it must NOT be retried. Its own
-//      wording tells it apart from #1, so no request context is needed.
+//      ("The model's safety guardrails were triggered."). Deterministic + terminal —
+//      retrying the identical request re-fails at the identical point, so we surface it
+//      at once. Benign code triggers it; it is not a judgment about the user's content.
+//   3. Forced tool_choice on `system`: rejected with "An unsupported generation guide
+//      was used." — deterministic and permanent (`pcc` accepts it fine), never retried.
 // classifyError() maps each to an OpenAI-shaped outcome so clients can branch without
-// string-matching Apple's prose:
-//   - guardrail        → finish_reason:"content_filter" (keep partial; NOT an error — the
-//                        OpenAI-idiomatic representation of a safety-stopped generation)
-//   - rate-limit       → type:"rate_limit_exceeded" (retried, then surfaced)
-//   - unavailability   → type:"service_unavailable" (terminal; e.g. missing PCC attribution)
-//   - tool_choice crash → type:"invalid_request_error" (terminal, never retried)
+// string-matching Apple's prose (guardrail → finish_reason:"content_filter"; rate-limit
+// → rate_limit_exceeded; unavailability → service_unavailable; tool_choice crash →
+// invalid_request_error).
 // Set FM_MAX_RETRIES=0 to disable rate-limit retries.
 const MAX_RETRIES = Number(process.env.FM_MAX_RETRIES ?? 4);
 const RETRY_BASE_MS = Number(process.env.FM_RETRY_BASE_MS ?? 1000);
 const RETRY_CAP_MS = Number(process.env.FM_RETRY_CAP_MS ?? 15000);
 
 // ── Token counting ───────────────────────────────────────────────────────────
-// fm serve reports real usage on both paths now, and the proxy relays it: verbatim on
-// the non-streaming path, and on the streaming path by forcing
-// `stream_options.include_usage` upstream (see the request handler). The counters here
-// are therefore only a FALLBACK, used when fm serve sends no usage at all and for the
-// assembled-size instrumentation below.
-//
-// Strategy: exact counts from Apple's own `fm count-tokens` where possible, with a
-// chars/4.4 heuristic when the CLI is unavailable (e.g. the Beta 5 licence gate).
+// fm serve reports real usage on both paths and the proxy relays it; these counters
+// are only a FALLBACK (fm serve sends no usage at all) and the assembled-size
+// instrumentation below. Exact counts from Apple's own `fm count-tokens` where
+// possible, chars/4.4 heuristic when the CLI is unavailable (e.g. the licence gate).
 const CHARS_PER_TOKEN = 4.4;
 // Two measured framing constants, each with one meaning:
 //   CONVERSATION_FRAMING — the fixed cost fm serve adds around a whole conversation,
@@ -167,12 +155,10 @@ function countPromptTokens(messages) {
   const { instructions, prompt } = splitMessages(messages);
   const n = fmTokenCount(prompt, instructions);
   if (n == null) return CONVERSATION_FRAMING + estimateTokens(instructions + "\n" + prompt);
-  // Beta 5 split the two counting modes apart. With -i, `count-tokens` applies the
-  // full conversation framing and matches fm serve's prompt_tokens EXACTLY (verified
-  // 0 diff at instruction lengths 11–300 chars). Without -i it counts raw prompt
-  // tokens only, landing a flat 54 below fm serve (verified 54 at prompt lengths
-  // 6–400 chars). Add the framing back so a request with no system message reports
-  // the same number as one that has one.
+  // With -i the count applies the full conversation framing and matches fm serve's
+  // prompt_tokens exactly; without it, `count-tokens` counts raw prompt tokens only,
+  // landing a flat 54 below what fm serve frames. Add the framing back so a request
+  // with no system message reports the same number as one that has one.
   return instructions ? n : n + CONVERSATION_FRAMING;
 }
 
@@ -411,20 +397,14 @@ function fixToolSchema(schema) {
 }
 
 // ── response_format schema dialect (structured output) ──────────────────────
-// LEGACY PATH. fm serve's constrained-decoding dialect requires title + x-order +
-// required + additionalProperties on every object schema reached through `$defs`;
-// without them it 400s with a DecodingError naming the exact missing key. Objects
-// reached only through inline `properties` nesting need none of it.
-//
-// The proxy no longer relies on this. fixResponseFormatSchema inlines the $refs and
-// drops $defs, which produces exactly the dialect-free inline shape fm serve is happy
-// with — and on Beta 5 the dialect is actively harmful, hanging the `system` engine
-// until the server is restarted. decorateDialect survives only as the fallback for a
-// cyclic or unresolvable $ref, which cannot be inlined.
-//
-// This matters because real schema generators (pydantic `.model_json_schema()`,
-// zod-to-json-schema, TypeBox) virtually always emit $defs/$ref for a named type, so
-// most real client schemas take the inlining path.
+// fm serve's constrained-decoding dialect requires title + x-order + required +
+// additionalProperties on every object schema reached through `$defs`; without them
+// it 400s with a DecodingError naming the exact missing key. Objects reached only
+// through inline `properties` nesting need none of it. Inlining $refs (see below) is
+// the primary path; dialect injection survives only as the cyclic-ref fallback.
+// Re-verify: send a $defs/$ref response_format without these keys → 400 naming the
+// missing key; with them on macOS 27 Beta 5 → `system` engine hangs and the server
+// must be restarted.
 function isDialectObjectSchema(s) {
   return !!(s && typeof s === "object" && (s.type === "object" || s.properties));
 }
@@ -484,17 +464,11 @@ function inlineDefs(schema) {
 }
 
 // Normalise a response_format `schema` into something fm serve accepts.
-//
-// Preferred path: inline the $refs and delete $defs. An object reached only through
-// inline `properties` nesting needs NO dialect keys at all (verified live), so this
-// makes a $defs schema work without decorating anything. It also avoids two separate
-// upstream failures: fm serve 400s a $defs object that lacks `x-order`, and on macOS 27
-// Beta 5 (fm 2.0.68) a $defs object that HAS the dialect hangs the `system` engine
-// indefinitely and leaves the server unable to answer anything until it is restarted.
-//
+// Preferred path: inline the $refs and delete $defs — an object reached only through
+// inline `properties` nesting needs NO dialect keys, so this avoids both upstream
+// failures (the 400 for missing keys, and the Beta-5 hang when they are present).
 // Fallback: a cyclic or unresolvable $ref cannot be inlined (a self-referencing tree
-// schema would expand forever). Those keep the old dialect injection — the best
-// available on Beta 3/4, and no worse than before on Beta 5.
+// would expand forever), so those keep the old dialect injection above.
 function fixResponseFormatSchema(schema) {
   if (!schema || typeof schema !== "object" || !schema.$defs) return schema;
   const inlined = inlineDefs(schema);
