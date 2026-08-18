@@ -628,7 +628,8 @@ function prepareUpstreamRequest(req, body) {
   // The full assembled size: the fallback number when fm serve sends no usage (e.g.
   // guardrail abort), logged per request to tie overflows to a real size. Messages
   // match fm serve exactly; the tool-schema part under-counts. GAUGE_MODE=msgs selects
-  // the messages-only number.
+  // the messages-only number (kept: an undocumented debug hatch the TEST harness
+  // sets for deterministic [assembled] output — see startStack in fm-proxy.test.js).
   let breakdown = null;
   if (isChat && parsedReq) {
     breakdown = assembledTokenBreakdown(parsedReq, fixed);
