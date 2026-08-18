@@ -785,6 +785,227 @@ function prepareUpstreamRequest(req, body) {
            clientDeclinedUsage, breakdown, promptTokens };
 }
 
+// ── Streaming relay ─────────────────────────────────────────────────────────
+// Relays one upstream SSE chat stream to the client: line assembly across chunk
+// boundaries, typed error frames, the preamble hold-back (see preBuffer), tool-call
+// arg re-expansion, and the final usage/finish chunk. All per-attempt stream state
+// lives in this closure; commit/fail/isAborting come from forward's attempt scope
+// so retry semantics are unchanged.
+function relayStreamingChat({ res, proxyRes, diag, commit, isCommitted, fail, isAborting, coercion,
+                              parsedReq, promptTokens, clientDeclinedUsage, reqStart }) {
+  // Streaming: fm serve sends a real final usage-only chunk now that we
+  // force stream_options.include_usage upstream (see realUsage below).
+  // Still accumulate completion text as a fallback estimate for upstreams
+  // that ignore the flag, and inject our own final chunk before [DONE]
+  // either way (so clients always see usage, or real numbers when we have
+  // them — see the end-of-stream handler).
+  let completionText = "";
+  let realUsage = null;   // fm serve's own usage object, if it sent one
+  let sawFinish = false;  // a clean finish_reason or [DONE] arrived
+  let producedOutput = false; // any content or tool_calls delta seen
+  let tFirstToken = null;  // wall-clock of first output delta (TTFT + tok/s)
+  let pending = "";       // line buffer across chunk boundaries
+  let lastChunkMeta = null;
+  let rawTail = "";       // last bytes of the upstream stream, for failure forensics
+  let surfacedError = false; // we already forwarded a typed error frame
+  let abortFinishReason = null; // set to "content_filter" on a guardrail abort
+  // PCC always opens a stream with an empty {"delta":{"role":"assistant"}}
+  // preamble, THEN either real output or an error frame. We must NOT commit
+  // the client head on that preamble, or an error arriving right after it
+  // would look post-commit and be unretryable. So buffer pre-output frames
+  // and only commit on the first meaningful frame (content/tool_calls/finish).
+  const preBuffer = [];
+  const flushPre = () => { for (const l of preBuffer) res.write(l); preBuffer.length = 0; };
+  const commitFlush = () => { commit(); flushPre(); };
+
+  function pump(s, flush) {
+    pending += s;
+    let idx;
+    while ((idx = pending.indexOf("\n")) !== -1 || (flush && pending.length)) {
+      if (isAborting()) return;
+      const line = idx !== -1 ? pending.slice(0, idx + 1) : pending;
+      pending = idx !== -1 ? pending.slice(idx + 1) : "";
+      const t = line.trim();
+      // Context overflow is deterministic — never retry it, just surface.
+      if (t.toLowerCase().includes("exceeded the model's context size")) {
+        diag("CONTEXT EXCEEDED", `— line: ${t}`);
+      }
+      let obj = null, isErr = false, errCls = null, meaningful = false;
+      if (t.startsWith("data:")) {
+        const payload = t.slice(5).trim();
+        if (payload === "[DONE]") { sawFinish = true; if (!isCommitted()) commitFlush(); continue; }
+        try {
+          obj = JSON.parse(payload);
+          isErr = isErrorPayload(obj);
+          if (isErr) {
+            errCls = classifyError(obj.error && obj.error.message);
+          } else if (obj.usage && (!obj.choices || obj.choices.length === 0)) {
+            // fm serve's real final usage-only chunk (choices:[], usage:{...}),
+            // present because we forced stream_options.include_usage upstream.
+            // Capture it; never relay this raw frame — the end-of-stream handler
+            // below emits the client-facing chunk using these real numbers (or
+            // the completionText-based estimate as a fallback if this never
+            // arrives), respecting the client's own usage opt-in/opt-out.
+            realUsage = obj.usage;
+            continue;
+          } else {
+            lastChunkMeta = { id: obj.id, model: obj.model, created: obj.created };
+            const ch0 = obj.choices && obj.choices[0];
+            if (ch0 && ch0.finish_reason) { sawFinish = true; meaningful = true; }
+            const delta = ch0 && ch0.delta;
+            if (delta && typeof delta.content === "string") {
+              if (tFirstToken == null) tFirstToken = Date.now();
+              completionText += delta.content; producedOutput = true; meaningful = true;
+            }
+            // Re-expand JSON-string tool-call args back to real objects.
+            if (delta && Array.isArray(delta.tool_calls)) {
+              if (tFirstToken == null) tFirstToken = Date.now();
+              producedOutput = true; meaningful = true;
+              if (rewriteToolCalls(delta.tool_calls, coercion)) {
+                if (!isCommitted()) commitFlush();
+                res.write(`data: ${JSON.stringify(obj)}\n\n`);
+                continue;
+              }
+            }
+          }
+        } catch { /* keepalive / non-JSON */ }
+      } else if (/languagemodelerror|error -1/i.test(t)) {
+        isErr = true; // raw (non-data) error line
+        errCls = classifyError(t);
+      } else if (t.startsWith("{")) {
+        // fm serve returns non-SSE errors (e.g. HTTP 503 service_unavailable
+        // for a missing-PCC-attribution `pcc` request) as BARE JSON, not a
+        // `data:` frame. Parse it so we classify + surface the typed error
+        // instead of treating the stream as empty and retrying blindly.
+        try {
+          obj = JSON.parse(t);
+          if (isErrorPayload(obj)) {
+            isErr = true;
+            errCls = classifyError(obj.error && obj.error.message);
+          }
+        } catch { /* not an error JSON */ }
+      }
+      // Safety-guardrail abort → OpenAI content_filter: keep any partial that
+      // was already streamed, end the stream with finish_reason:"content_filter",
+      // and emit NO error frame (so SDK clients get the partial + a documented
+      // finish_reason instead of an exception). Only the guardrail maps to
+      // content_filter; rate-limit and service_unavailable stay typed errors
+      // (they're HTTP 429/503 analogues, not content filtering).
+      if (isErr && errCls && errCls.type === "generation_aborted") {
+        diag(`${errCls.label}`, `— line: ${t}`);
+        abortFinishReason = "content_filter";
+        sawFinish = true;      // terminate the stream cleanly (no retry)
+        continue;              // drop the error frame; end handler emits the finish
+      }
+      // Pre-commit upstream error: retry only if transient (rate-limit). A
+      // safety-guardrail abort is terminal — retrying re-fails identically —
+      // so surface it immediately instead of burning the retry budget.
+      if (isErr && !isCommitted()) {
+        diag(`${errCls.label} (pre-commit)`, `— line: ${t}`);
+        if (errCls.retry && fail("upstream error frame")) return;
+        surfacedError = true; // retries exhausted OR terminal: forward typed
+        meaningful = true;
+      }
+      if (!isCommitted() && !meaningful) {
+        // Preamble / keepalive before any real output — hold it so a
+        // following error frame is still pre-commit and retryable.
+        preBuffer.push(line);
+        continue;
+      }
+      if (!isCommitted()) commitFlush();
+      // Forward content as-is; rewrite error frames to a typed OpenAI error so
+      // clients can branch on `type` (rate_limit_exceeded / generation_aborted)
+      // without string-matching Apple's message.
+      if (isErr) {
+        const errMsg = (obj && obj.error && obj.error.message) || t;
+        res.write(errorFrame(errCls, errMsg));
+        if (!surfacedError) surfacedError = true;
+      } else {
+        res.write(line);
+      }
+    }
+  }
+
+  proxyRes.on("data", (chunk) => {
+    if (isAborting()) return;
+    rawTail = (rawTail + chunk).slice(-2000); // keep a bounded tail for diagnostics
+    pump(chunk, false);
+  });
+
+  proxyRes.on("end", () => {
+    if (isAborting()) return;
+    pump("", true); // flush any buffered partial line
+    if (isAborting()) return; // pump may have triggered a retry
+    if (!isCommitted()) {
+      // Nothing forwardable arrived — empty/aborted stream. Retry it;
+      // if exhausted, tell the client plainly instead of an empty 200.
+      if (!sawFinish && completionText === "" && fail("empty stream (no finish)")) return;
+      commit();
+      if (!sawFinish && completionText === "" && !surfacedError) {
+        diag("GIVING UP (empty stream after retries)", `rawTail=${JSON.stringify(rawTail)}`);
+        res.write(errorFrame(classifyError("rate limit"),
+          "upstream returned no output (likely PCC rate limit) after retries"));
+      }
+    }
+    if (!sawFinish && completionText !== "") {
+      diag("UPSTREAM STREAM ABORTED (no finish)",
+        `completionChars=${completionText.length} rawTail=${JSON.stringify(rawTail)}`);
+    }
+    // Finished cleanly but produced neither text nor tool_calls — the
+    // error path (error frame then [DONE]) that exhausted retries. Tool-
+    // call turns set producedOutput, so they don't trip this.
+    if (sawFinish && !producedOutput) {
+      diag("EMPTY COMPLETION (finished, no output)",
+        `rawTail=${JSON.stringify(rawTail)}`);
+    }
+    const completionTokens = countCompletionTokens(completionText);
+    // Throughput: generation time is first-token → now (independent of
+    // retry/network overhead); TTFT is request-received → first-token.
+    const nowEnd = Date.now();
+    logToks(
+      (parsedReq && parsedReq.model) || "unknown", "stream", completionTokens,
+      tFirstToken != null ? nowEnd - tFirstToken : nowEnd - reqStart,
+      tFirstToken != null ? tFirstToken - reqStart : null,
+    );
+    // Prefer fm serve's own real usage (captured above from the frame we
+    // forced upstream via stream_options.include_usage) over the
+    // completionText-based estimate — the same "trust fm serve's own
+    // number" upgrade already applied to the non-streaming path. The
+    // estimate only fires as a fallback when no usage frame arrives at all
+    // (e.g. a guardrail abort that never reaches a clean finish).
+    const usage = realUsage || {
+      prompt_tokens: promptTokens,
+      completion_tokens: completionTokens,
+      total_tokens: promptTokens + completionTokens,
+    };
+    const meta = lastChunkMeta || {};
+    const finishChunk = {
+      id: meta.id || "chatcmpl-proxy",
+      object: "chat.completion.chunk",
+      created: meta.created || Math.floor(Date.now() / 1000),
+      model: meta.model || (parsedReq && parsedReq.model) || "unknown",
+      choices: [{ index: 0, delta: {}, finish_reason: abortFinishReason }],
+    };
+    // We always suppress the upstream [DONE] and re-emit our own final
+    // chunk, so clients (Pi) that read the last chunk get a real
+    // prompt_tokens. The client's own stream_options.include_usage opt-out
+    // is honored on the way OUT even though we always force it upstream:
+    // explicit `false` gets no usage field (vanilla OpenAI shape); absent
+    // or `true` keeps the established always-on usage chunk. The
+    // finish_reason itself must still go out even when usage is declined —
+    // for a content_filter abort it's ONLY ever carried by this chunk (the
+    // abort's own error frame is swallowed above), so we can't just drop
+    // the whole chunk on an opt-out.
+    if (!clientDeclinedUsage) {
+      res.write(`data: ${JSON.stringify({ ...finishChunk, usage })}\n\n`);
+    } else if (abortFinishReason) {
+      res.write(`data: ${JSON.stringify(finishChunk)}\n\n`);
+    }
+    res.write("data: [DONE]\n\n");
+    res.end();
+  });
+}
+
 const server = http.createServer((req, res) => {
   // CORS preflight: answer immediately, before buffering any body.
   if (req.method === "OPTIONS") {
@@ -865,217 +1086,9 @@ const server = http.createServer((req, res) => {
           };
 
           if (isStream) {
-            // Streaming: fm serve sends a real final usage-only chunk now that we
-            // force stream_options.include_usage upstream (see realUsage below).
-            // Still accumulate completion text as a fallback estimate for upstreams
-            // that ignore the flag, and inject our own final chunk before [DONE]
-            // either way (so clients always see usage, or real numbers when we have
-            // them — see the end-of-stream handler).
-            let completionText = "";
-            let realUsage = null;   // fm serve's own usage object, if it sent one
-            let sawFinish = false;  // a clean finish_reason or [DONE] arrived
-            let producedOutput = false; // any content or tool_calls delta seen
-            let tFirstToken = null;  // wall-clock of first output delta (TTFT + tok/s)
-            let pending = "";       // line buffer across chunk boundaries
-            let lastChunkMeta = null;
-            let rawTail = "";       // last bytes of the upstream stream, for failure forensics
-            let surfacedError = false; // we already forwarded a typed error frame
-            let abortFinishReason = null; // set to "content_filter" on a guardrail abort
-            // PCC always opens a stream with an empty {"delta":{"role":"assistant"}}
-            // preamble, THEN either real output or an error frame. We must NOT commit
-            // the client head on that preamble, or an error arriving right after it
-            // would look post-commit and be unretryable. So buffer pre-output frames
-            // and only commit on the first meaningful frame (content/tool_calls/finish).
-            const preBuffer = [];
-            const flushPre = () => { for (const l of preBuffer) res.write(l); preBuffer.length = 0; };
-            const commitFlush = () => { commit(); flushPre(); };
-
-            function pump(s, flush) {
-              pending += s;
-              let idx;
-              while ((idx = pending.indexOf("\n")) !== -1 || (flush && pending.length)) {
-                if (aborting) return;
-                const line = idx !== -1 ? pending.slice(0, idx + 1) : pending;
-                pending = idx !== -1 ? pending.slice(idx + 1) : "";
-                const t = line.trim();
-                // Context overflow is deterministic — never retry it, just surface.
-                if (t.toLowerCase().includes("exceeded the model's context size")) {
-                  diag("CONTEXT EXCEEDED", `— line: ${t}`);
-                }
-                let obj = null, isErr = false, errCls = null, meaningful = false;
-                if (t.startsWith("data:")) {
-                  const payload = t.slice(5).trim();
-                  if (payload === "[DONE]") { sawFinish = true; if (!committed) commitFlush(); continue; }
-                  try {
-                    obj = JSON.parse(payload);
-                    isErr = isErrorPayload(obj);
-                    if (isErr) {
-                      errCls = classifyError(obj.error && obj.error.message);
-                    } else if (obj.usage && (!obj.choices || obj.choices.length === 0)) {
-                      // fm serve's real final usage-only chunk (choices:[], usage:{...}),
-                      // present because we forced stream_options.include_usage upstream.
-                      // Capture it; never relay this raw frame — the end-of-stream handler
-                      // below emits the client-facing chunk using these real numbers (or
-                      // the completionText-based estimate as a fallback if this never
-                      // arrives), respecting the client's own usage opt-in/opt-out.
-                      realUsage = obj.usage;
-                      continue;
-                    } else {
-                      lastChunkMeta = { id: obj.id, model: obj.model, created: obj.created };
-                      const ch0 = obj.choices && obj.choices[0];
-                      if (ch0 && ch0.finish_reason) { sawFinish = true; meaningful = true; }
-                      const delta = ch0 && ch0.delta;
-                      if (delta && typeof delta.content === "string") {
-                        if (tFirstToken == null) tFirstToken = Date.now();
-                        completionText += delta.content; producedOutput = true; meaningful = true;
-                      }
-                      // Re-expand JSON-string tool-call args back to real objects.
-                      if (delta && Array.isArray(delta.tool_calls)) {
-                        if (tFirstToken == null) tFirstToken = Date.now();
-                        producedOutput = true; meaningful = true;
-                        if (rewriteToolCalls(delta.tool_calls, coercion)) {
-                          if (!committed) commitFlush();
-                          res.write(`data: ${JSON.stringify(obj)}\n\n`);
-                          continue;
-                        }
-                      }
-                    }
-                  } catch { /* keepalive / non-JSON */ }
-                } else if (/languagemodelerror|error -1/i.test(t)) {
-                  isErr = true; // raw (non-data) error line
-                  errCls = classifyError(t);
-                } else if (t.startsWith("{")) {
-                  // fm serve returns non-SSE errors (e.g. HTTP 503 service_unavailable
-                  // for a missing-PCC-attribution `pcc` request) as BARE JSON, not a
-                  // `data:` frame. Parse it so we classify + surface the typed error
-                  // instead of treating the stream as empty and retrying blindly.
-                  try {
-                    obj = JSON.parse(t);
-                    if (isErrorPayload(obj)) {
-                      isErr = true;
-                      errCls = classifyError(obj.error && obj.error.message);
-                    }
-                  } catch { /* not an error JSON */ }
-                }
-                // Safety-guardrail abort → OpenAI content_filter: keep any partial that
-                // was already streamed, end the stream with finish_reason:"content_filter",
-                // and emit NO error frame (so SDK clients get the partial + a documented
-                // finish_reason instead of an exception). Only the guardrail maps to
-                // content_filter; rate-limit and service_unavailable stay typed errors
-                // (they're HTTP 429/503 analogues, not content filtering).
-                if (isErr && errCls && errCls.type === "generation_aborted") {
-                  diag(`${errCls.label}`, `— line: ${t}`);
-                  abortFinishReason = "content_filter";
-                  sawFinish = true;      // terminate the stream cleanly (no retry)
-                  continue;              // drop the error frame; end handler emits the finish
-                }
-                // Pre-commit upstream error: retry only if transient (rate-limit). A
-                // safety-guardrail abort is terminal — retrying re-fails identically —
-                // so surface it immediately instead of burning the retry budget.
-                if (isErr && !committed) {
-                  diag(`${errCls.label} (pre-commit)`, `— line: ${t}`);
-                  if (errCls.retry && fail("upstream error frame")) return;
-                  surfacedError = true; // retries exhausted OR terminal: forward typed
-                  meaningful = true;
-                }
-                if (!committed && !meaningful) {
-                  // Preamble / keepalive before any real output — hold it so a
-                  // following error frame is still pre-commit and retryable.
-                  preBuffer.push(line);
-                  continue;
-                }
-                if (!committed) commitFlush();
-                // Forward content as-is; rewrite error frames to a typed OpenAI error so
-                // clients can branch on `type` (rate_limit_exceeded / generation_aborted)
-                // without string-matching Apple's message.
-                if (isErr) {
-                  const errMsg = (obj && obj.error && obj.error.message) || t;
-                  res.write(errorFrame(errCls, errMsg));
-                  if (!surfacedError) surfacedError = true;
-                } else {
-                  res.write(line);
-                }
-              }
-            }
-
-            proxyRes.on("data", (chunk) => {
-              if (aborting) return;
-              rawTail = (rawTail + chunk).slice(-2000); // keep a bounded tail for diagnostics
-              pump(chunk, false);
-            });
-
-            proxyRes.on("end", () => {
-              if (aborting) return;
-              pump("", true); // flush any buffered partial line
-              if (aborting) return; // pump may have triggered a retry
-              if (!committed) {
-                // Nothing forwardable arrived — empty/aborted stream. Retry it;
-                // if exhausted, tell the client plainly instead of an empty 200.
-                if (!sawFinish && completionText === "" && fail("empty stream (no finish)")) return;
-                commit();
-                if (!sawFinish && completionText === "" && !surfacedError) {
-                  diag("GIVING UP (empty stream after retries)", `rawTail=${JSON.stringify(rawTail)}`);
-                  res.write(errorFrame(classifyError("rate limit"),
-                    "upstream returned no output (likely PCC rate limit) after retries"));
-                }
-              }
-              if (!sawFinish && completionText !== "") {
-                diag("UPSTREAM STREAM ABORTED (no finish)",
-                  `completionChars=${completionText.length} rawTail=${JSON.stringify(rawTail)}`);
-              }
-              // Finished cleanly but produced neither text nor tool_calls — the
-              // error path (error frame then [DONE]) that exhausted retries. Tool-
-              // call turns set producedOutput, so they don't trip this.
-              if (sawFinish && !producedOutput) {
-                diag("EMPTY COMPLETION (finished, no output)",
-                  `rawTail=${JSON.stringify(rawTail)}`);
-              }
-              const completionTokens = countCompletionTokens(completionText);
-              // Throughput: generation time is first-token → now (independent of
-              // retry/network overhead); TTFT is request-received → first-token.
-              const nowEnd = Date.now();
-              logToks(
-                (parsedReq && parsedReq.model) || "unknown", "stream", completionTokens,
-                tFirstToken != null ? nowEnd - tFirstToken : nowEnd - reqStart,
-                tFirstToken != null ? tFirstToken - reqStart : null,
-              );
-              // Prefer fm serve's own real usage (captured above from the frame we
-              // forced upstream via stream_options.include_usage) over the
-              // completionText-based estimate — the same "trust fm serve's own
-              // number" upgrade already applied to the non-streaming path. The
-              // estimate only fires as a fallback when no usage frame arrives at all
-              // (e.g. a guardrail abort that never reaches a clean finish).
-              const usage = realUsage || {
-                prompt_tokens: promptTokens,
-                completion_tokens: completionTokens,
-                total_tokens: promptTokens + completionTokens,
-              };
-              const meta = lastChunkMeta || {};
-              const finishChunk = {
-                id: meta.id || "chatcmpl-proxy",
-                object: "chat.completion.chunk",
-                created: meta.created || Math.floor(Date.now() / 1000),
-                model: meta.model || (parsedReq && parsedReq.model) || "unknown",
-                choices: [{ index: 0, delta: {}, finish_reason: abortFinishReason }],
-              };
-              // We always suppress the upstream [DONE] and re-emit our own final
-              // chunk, so clients (Pi) that read the last chunk get a real
-              // prompt_tokens. The client's own stream_options.include_usage opt-out
-              // is honored on the way OUT even though we always force it upstream:
-              // explicit `false` gets no usage field (vanilla OpenAI shape); absent
-              // or `true` keeps the established always-on usage chunk. The
-              // finish_reason itself must still go out even when usage is declined —
-              // for a content_filter abort it's ONLY ever carried by this chunk (the
-              // abort's own error frame is swallowed above), so we can't just drop
-              // the whole chunk on an opt-out.
-              if (!clientDeclinedUsage) {
-                res.write(`data: ${JSON.stringify({ ...finishChunk, usage })}\n\n`);
-              } else if (abortFinishReason) {
-                res.write(`data: ${JSON.stringify(finishChunk)}\n\n`);
-              }
-              res.write("data: [DONE]\n\n");
-              res.end();
-            });
+            relayStreamingChat({ res, proxyRes, diag, commit, isCommitted: () => committed, fail,
+              isAborting: () => aborting, coercion, parsedReq, promptTokens,
+              clientDeclinedUsage, reqStart });
             return;
           }
 
