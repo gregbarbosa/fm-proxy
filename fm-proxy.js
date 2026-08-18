@@ -1006,6 +1006,63 @@ function relayStreamingChat({ res, proxyRes, diag, commit, isCommitted, fail, is
   });
 }
 
+// ── Non-streaming relay ─────────────────────────────────────────────────────
+// Buffers the whole upstream reply (so a failure is still retryable via `fail`),
+// rewrites guardrail aborts into a content_filter completion, re-expands
+// JSON-string tool-call args, and relays fm serve's own usage untouched.
+function relayNonStreamingChat({ res, proxyRes, diag, fail, isAborting, markCommitted,
+                                 coercion, parsedReq, promptTokens, reqStart }) {
+// Non-streaming: buffer fully (so we can still retry), then fix usage.
+let raw = "";
+proxyRes.on("data", (c) => (raw += c));
+proxyRes.on("end", () => {
+  if (isAborting()) return;
+  let obj = null;
+  try { obj = JSON.parse(raw); } catch { /* not JSON */ }
+  let outStatus = proxyRes.statusCode;
+  if (isErrorPayload(obj)) {
+    const cls = classifyError(obj.error && obj.error.message);
+    diag(`${cls.label} (non-stream)`, `— ${raw.slice(0, 200)}`);
+    if (cls.type === "generation_aborted") {
+      // content_filter: return a normal completion finished by the filter
+      // (OpenAI-aligned), not an error. fm serve's non-stream error carries
+      // no partial, so content is empty; status is 200 (it's a valid completion).
+      obj = {
+        id: "chatcmpl-proxy", object: "chat.completion",
+        model: (parsedReq && parsedReq.model) || "unknown",
+        choices: [{ index: 0, message: { role: "assistant", content: "" }, finish_reason: "content_filter" }],
+        usage: { prompt_tokens: promptTokens, completion_tokens: 0, total_tokens: promptTokens },
+      };
+      outStatus = 200;
+    } else {
+      if (cls.retry && fail("non-stream error")) return;
+      // terminal (service_unavailable) OR retries exhausted (rate-limit): type it.
+      if (obj.error && typeof obj.error === "object") {
+        obj.error = { message: obj.error.message, type: cls.type, code: cls.code };
+      }
+    }
+  }
+  let out = raw;
+  if (obj) {
+    // fm serve 2.0.59+ (macOS 27 Beta 3) reports real, accurate non-streaming
+    // usage (verified live against `fm count-tokens`) — no override needed here
+    // anymore. Streaming still sends none at all, so that path (below) still
+    // synthesizes it from promptTokens/completionTokens.
+    // Re-expand JSON-string tool-call args back to real objects.
+    const msg = obj.choices && obj.choices[0] && obj.choices[0].message;
+    if (msg && Array.isArray(msg.tool_calls)) rewriteToolCalls(msg.tool_calls, coercion);
+    out = JSON.stringify(obj);
+  }
+  // Throughput: no first-token timestamp in non-streaming (upstream
+  // buffers the whole reply), so duration is request-received → now.
+  const nsCompletionTokens = (obj && obj.usage && obj.usage.completion_tokens) || 0;
+  logToks((parsedReq && parsedReq.model) || "unknown", "sync", nsCompletionTokens, Date.now() - reqStart);
+  markCommitted();
+  relayHead(res, outStatus, proxyRes.headers, Buffer.byteLength(out));
+  res.end(out);
+});
+}
+
 const server = http.createServer((req, res) => {
   // CORS preflight: answer immediately, before buffering any body.
   if (req.method === "OPTIONS") {
@@ -1092,55 +1149,9 @@ const server = http.createServer((req, res) => {
             return;
           }
 
-          // Non-streaming: buffer fully (so we can still retry), then fix usage.
-          let raw = "";
-          proxyRes.on("data", (c) => (raw += c));
-          proxyRes.on("end", () => {
-            if (aborting) return;
-            let obj = null;
-            try { obj = JSON.parse(raw); } catch { /* not JSON */ }
-            let outStatus = proxyRes.statusCode;
-            if (isErrorPayload(obj)) {
-              const cls = classifyError(obj.error && obj.error.message);
-              diag(`${cls.label} (non-stream)`, `— ${raw.slice(0, 200)}`);
-              if (cls.type === "generation_aborted") {
-                // content_filter: return a normal completion finished by the filter
-                // (OpenAI-aligned), not an error. fm serve's non-stream error carries
-                // no partial, so content is empty; status is 200 (it's a valid completion).
-                obj = {
-                  id: "chatcmpl-proxy", object: "chat.completion",
-                  model: (parsedReq && parsedReq.model) || "unknown",
-                  choices: [{ index: 0, message: { role: "assistant", content: "" }, finish_reason: "content_filter" }],
-                  usage: { prompt_tokens: promptTokens, completion_tokens: 0, total_tokens: promptTokens },
-                };
-                outStatus = 200;
-              } else {
-                if (cls.retry && fail("non-stream error")) return;
-                // terminal (service_unavailable) OR retries exhausted (rate-limit): type it.
-                if (obj.error && typeof obj.error === "object") {
-                  obj.error = { message: obj.error.message, type: cls.type, code: cls.code };
-                }
-              }
-            }
-            let out = raw;
-            if (obj) {
-              // fm serve 2.0.59+ (macOS 27 Beta 3) reports real, accurate non-streaming
-              // usage (verified live against `fm count-tokens`) — no override needed here
-              // anymore. Streaming still sends none at all, so that path (below) still
-              // synthesizes it from promptTokens/completionTokens.
-              // Re-expand JSON-string tool-call args back to real objects.
-              const msg = obj.choices && obj.choices[0] && obj.choices[0].message;
-              if (msg && Array.isArray(msg.tool_calls)) rewriteToolCalls(msg.tool_calls, coercion);
-              out = JSON.stringify(obj);
-            }
-            // Throughput: no first-token timestamp in non-streaming (upstream
-            // buffers the whole reply), so duration is request-received → now.
-            const nsCompletionTokens = (obj && obj.usage && obj.usage.completion_tokens) || 0;
-            logToks((parsedReq && parsedReq.model) || "unknown", "sync", nsCompletionTokens, Date.now() - reqStart);
-            committed = true;
-            relayHead(res, outStatus, proxyRes.headers, Buffer.byteLength(out));
-            res.end(out);
-          });
+          relayNonStreamingChat({ res, proxyRes, diag, fail,
+            isAborting: () => aborting, markCommitted: () => { committed = true; },
+            coercion, parsedReq, promptTokens, reqStart });
         }
       );
       plan.setActiveReq(proxyReq);
