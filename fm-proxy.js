@@ -676,6 +676,76 @@ function relayHead(res, statusCode, upstreamHeaders, bodyLen) {
   res.writeHead(statusCode, headers);
 }
 
+// ── Per-request preparation ─────────────────────────────────────────────────
+// Build the upstream payload and per-request context from the client's raw body:
+// fixTools' schema rewrites, the stream fixups below, the tool-call coercion map,
+// and the assembled-size instrumentation. Pure bookkeeping — no I/O except the
+// [assembled] log line, which fires once per request here rather than per attempt.
+function prepareUpstreamRequest(req, body) {
+  const { body: toolFixed, coercion, parsed: parsedReq } = fixTools(body);
+
+  const isChat = !!(req.url && req.url.includes("/chat/completions"));
+  const isStream = !!(parsedReq && parsedReq.stream);
+
+  // fm serve (macOS 27 Beta 3+) sends a REAL usage chunk on a streaming
+  // completion, but only when the request opts in via the standard OpenAI
+  // `stream_options.include_usage:true` field — real clients (Pi included)
+  // essentially never set it. Force it upstream on every streaming request
+  // regardless of what the client sent, so the proxy always has fm serve's
+  // real numbers to relay (see the streaming end-of-stream handler) instead
+  // of falling back to the completion-text estimate. The CLIENT's own ask
+  // about what THEY get back is still honored separately: explicit
+  // `include_usage:false` suppresses the usage field on the way out; absent
+  // or `true` keeps the proxy's established always-on usage chunk.
+  const clientDeclinedUsage = !!(
+    parsedReq &&
+    parsedReq.stream_options &&
+    parsedReq.stream_options.include_usage === false
+  );
+  let fixed = toolFixed;
+  if (isStream && parsedReq) {
+    parsedReq.stream_options = { ...(parsedReq.stream_options || {}), include_usage: true };
+    fixed = JSON.stringify(parsedReq);
+  } else if (isChat && parsedReq && parsedReq.stream === undefined) {
+    // macOS 27 Beta 5 (fm 2.0.68) flipped the default: a chat request that OMITS
+    // `stream` now comes back as text/event-stream, where every earlier build (and
+    // the OpenAI spec) returns a single JSON object. Only an explicit
+    // `stream:false` still selects JSON. Clients that never set the field — most
+    // OpenAI SDKs — would get an SSE body they cannot parse, so pin it here.
+    parsedReq.stream = false;
+    fixed = JSON.stringify(parsedReq);
+  }
+  // Compute the full assembled size fm serve actually frames (messages + tool
+  // schemas + assistant tool_calls + per-message framing). Both success paths relay
+  // fm serve's OWN usage, so this is a fallback and an instrumentation aid: it is
+  // what gets reported when fm serve sends no usage at all (e.g. a guardrail abort
+  // that never reaches a clean finish), and it is logged on every request so a
+  // context-overflow can be tied to a real assembled size. The messages part now
+  // reproduces fm serve's prompt_tokens exactly (verified diff 0 at 1/3/5 messages,
+  // with and without a system prompt); the tool-schema part is still an estimate,
+  // since fm serve frames tools more heavily than their raw JSON. Set GAUGE_MODE=msgs
+  // for the messages-only number.
+  let breakdown = null;
+  if (isChat && parsedReq) {
+    breakdown = assembledTokenBreakdown(parsedReq, fixed);
+    logBreakdown("req", parsedReq.model || "unknown", breakdown);
+  }
+  const promptTokens = !isChat || !parsedReq
+    ? 0
+    : process.env.GAUGE_MODE === "msgs"
+      ? breakdown.msgTokens
+      : breakdown.assembledTotal;
+
+  // We always forward a fully-buffered body and set our own Content-Length, so
+  // any inbound Transfer-Encoding (e.g. a client that streamed its upload with
+  // chunked encoding) must be dropped — keeping both is illegal framing and
+  // upstream rejects it with HPE_INVALID_CONTENT_LENGTH.
+  const upstreamHeaders = { ...req.headers, "content-length": Buffer.byteLength(fixed) };
+  delete upstreamHeaders["transfer-encoding"];
+  return { fixed, upstreamHeaders, coercion, parsedReq, isChat, isStream,
+           clientDeclinedUsage, breakdown, promptTokens };
+}
+
 const server = http.createServer((req, res) => {
   // CORS preflight: answer immediately, before buffering any body.
   if (req.method === "OPTIONS") {
@@ -693,59 +763,9 @@ const server = http.createServer((req, res) => {
   req.on("error", () => { /* client aborted upload; nothing to forward */ });
   req.on("end", () => {
     const reqStart = Date.now();
-    const { body: toolFixed, coercion, parsed: parsedReq } = fixTools(body);
-
-    const isChat = req.url && req.url.includes("/chat/completions");
-    const isStream = !!(parsedReq && parsedReq.stream);
-
-    // fm serve (macOS 27 Beta 3+) sends a REAL usage chunk on a streaming
-    // completion, but only when the request opts in via the standard OpenAI
-    // `stream_options.include_usage:true` field — real clients (Pi included)
-    // essentially never set it. Force it upstream on every streaming request
-    // regardless of what the client sent, so the proxy always has fm serve's
-    // real numbers to relay (see the streaming end-of-stream handler below)
-    // instead of falling back to the completion-text estimate. The CLIENT's
-    // own ask about what THEY get back is still honored separately: explicit
-    // `include_usage:false` suppresses the usage field on the way out; absent
-    // or `true` keeps the proxy's established always-on usage chunk.
-    const clientDeclinedUsage = !!(
-      parsedReq &&
-      parsedReq.stream_options &&
-      parsedReq.stream_options.include_usage === false
-    );
-    let fixed = toolFixed;
-    if (isStream && parsedReq) {
-      parsedReq.stream_options = { ...(parsedReq.stream_options || {}), include_usage: true };
-      fixed = JSON.stringify(parsedReq);
-    } else if (isChat && parsedReq && parsedReq.stream === undefined) {
-      // macOS 27 Beta 5 (fm 2.0.68) flipped the default: a chat request that OMITS
-      // `stream` now comes back as text/event-stream, where every earlier build (and
-      // the OpenAI spec) returns a single JSON object. Only an explicit
-      // `stream:false` still selects JSON. Clients that never set the field — most
-      // OpenAI SDKs — would get an SSE body they cannot parse, so pin it here.
-      parsedReq.stream = false;
-      fixed = JSON.stringify(parsedReq);
-    }
-    // Compute the full assembled size fm serve actually frames (messages + tool
-    // schemas + assistant tool_calls + per-message framing). Both success paths relay
-    // fm serve's OWN usage, so this is a fallback and an instrumentation aid: it is
-    // what gets reported when fm serve sends no usage at all (e.g. a guardrail abort
-    // that never reaches a clean finish), and it is logged on every request so a
-    // context-overflow can be tied to a real assembled size. The messages part now
-    // reproduces fm serve's prompt_tokens exactly (verified diff 0 at 1/3/5 messages,
-    // with and without a system prompt); the tool-schema part is still an estimate,
-    // since fm serve frames tools more heavily than their raw JSON. Set GAUGE_MODE=msgs
-    // for the messages-only number.
-    let breakdown = null;
-    if (isChat && parsedReq) {
-      breakdown = assembledTokenBreakdown(parsedReq, fixed);
-      logBreakdown("req", parsedReq.model || "unknown", breakdown);
-    }
-    const promptTokens = !isChat || !parsedReq
-      ? 0
-      : process.env.GAUGE_MODE === "msgs"
-        ? breakdown.msgTokens
-        : breakdown.assembledTotal;
+    const ctx = prepareUpstreamRequest(req, body);
+    const { fixed, upstreamHeaders, coercion, parsedReq, isChat, isStream,
+            clientDeclinedUsage, breakdown, promptTokens } = ctx;
 
     // One-line diagnostic binding a failure to this request's real assembled size
     // (the empirical PCC ceiling) — shared by the HTTP-status, context-overflow,
@@ -786,13 +806,6 @@ const server = http.createServer((req, res) => {
       }, delay);
       return true;
     }
-
-    // We always forward a fully-buffered body and set our own Content-Length, so
-    // any inbound Transfer-Encoding (e.g. a client that streamed its upload with
-    // chunked encoding) must be dropped — keeping both is illegal framing and
-    // upstream rejects it with HPE_INVALID_CONTENT_LENGTH.
-    const upstreamHeaders = { ...req.headers, "content-length": Buffer.byteLength(fixed) };
-    delete upstreamHeaders["transfer-encoding"];
 
     function forward(attempt) {
       let aborting = false; // set when we tear the upstream down to retry
