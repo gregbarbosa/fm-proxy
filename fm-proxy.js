@@ -83,14 +83,11 @@ function splitMessages(messages) {
 }
 
 // Exact token count via `fm count-tokens -q`. Text is piped on stdin to avoid
-// argv length limits; optional instructions go through -i so the count includes
-// their (heavier) template wrapping, matching how the server frames a turn.
-// Returns null if the binary is missing or errors (callers fall back to the
-// heuristic).
-// Memoize counts: each call forks `fm` (a synchronous spawn that blocks the event
-// loop), and the heavy inputs — system prompt and flattened tool schemas — repeat
-// verbatim on every turn. Counts are a pure function of (text, instructions), so a
-// keyed cache turns those repeats into free lookups. Bounded to keep memory flat.
+// argv length limits; instructions go through -i so the count includes their
+// (heavier) template wrapping, matching how the server frames a turn. Returns null
+// if the binary is missing or errors (callers fall back to the heuristic). Counts
+// are memoized: each call forks `fm` synchronously, and the heavy inputs repeat
+// verbatim every turn; bounded to keep memory flat.
 const _tokenCache = new Map();
 const _TOKEN_CACHE_MAX = 512;
 // `fm count-tokens` (named `token-count` before Beta 4). This targets Beta 5 only, so
@@ -167,11 +164,9 @@ function countPromptTokens(messages) {
 // — that is what Pi displays. But fm serve frames a much larger prompt: the
 // flattened tool schemas, the assistant's prior tool_calls (which live in
 // m.tool_calls, not m.content), and a per-turn template wrapper on EVERY turn.
-// This breakdown measures the real assembled size so we can find PCC's true
-// context ceiling empirically: log it for every request, then read off the value
-// at the request where fm serve reports "transcript exceeded the model's context
-// size". `fixedBody` is the post-fixTools payload actually forwarded upstream, so
-// its `tools` are the flattened schemas the model really receives.
+// This measures the real assembled size so PCC's true context ceiling can be found
+// empirically: log it, then read off the value at the request where fm serve
+// reports "transcript exceeded the model's context size".
 function assembledTokenBreakdown(parsedReq, fixedBody) {
   const messages = (parsedReq && parsedReq.messages) || [];
   // 1. messages content — the current gauge number.
@@ -215,12 +210,8 @@ function logBreakdown(tag, model, b) {
 }
 
 // Per-request throughput — completion tok/s, with TTFT for streaming. Emitted on
-// every chat completion (NOT gated behind --verbose) so it surfaces in the
-// launcher's quiet mode: a one-line, high-signal counter. `kind` is "stream" or
-// "sync"; `durationMs` is generation time (streaming: first→last token,
-// non-streaming: request-received→response-end, since upstream buffers the whole
-// reply). Guards divide-by-zero and zero-token turns (tool-only / empty
-// completions) so the line stays well-formed regardless of path.
+// every chat completion (not gated behind --verbose) as a one-line, high-signal
+// counter. Guards divide-by-zero and zero-token turns so the line stays well-formed.
 function logToks(model, kind, completionTokens, durationMs, ttftMs) {
   const secs = durationMs / 1000;
   const tps = secs > 0 ? (completionTokens / secs) : 0;
@@ -490,13 +481,14 @@ function fixTools(body) {
         if (jsonFields.length && tool.function?.name) {
           coercion[tool.function.name] = jsonFields;
         }
-        // fm serve (Beta 3 / fm 2.0.59, verified live) 400s the ENTIRE request
-        // ("Invalid JSON: The data couldn't be read because it is missing.")
-        // if ANY tool's function.description is absent or null — independent of
-        // that tool's parameters shape, tool_choice, or which tool is actually
-        // called. An empty string is accepted. OpenAI's spec makes description
-        // optional, so a compliant client can send exactly the shape that
+        // fm serve 400s the ENTIRE request ("Invalid JSON: The data couldn't be read
+        // because it is missing.") if ANY tool's function.description is absent or
+        // null — independent of that tool's parameters shape, tool_choice, or which
+        // tool is actually called. An empty string is accepted. OpenAI's spec makes
+        // description optional, so a compliant client can send exactly the shape that
         // breaks fm serve; backfill it here rather than erroring.
+        // Re-verify: POST a tools array with one description-less function → the
+        // whole request 400s even if the model never calls that tool.
         const description = tool.function?.description;
         return {
           ...tool,
@@ -700,16 +692,13 @@ function prepareUpstreamRequest(req, body) {
   const isChat = !!(req.url && req.url.includes("/chat/completions"));
   const isStream = !!(parsedReq && parsedReq.stream);
 
-  // fm serve (macOS 27 Beta 3+) sends a REAL usage chunk on a streaming
-  // completion, but only when the request opts in via the standard OpenAI
-  // `stream_options.include_usage:true` field — real clients (Pi included)
-  // essentially never set it. Force it upstream on every streaming request
-  // regardless of what the client sent, so the proxy always has fm serve's
-  // real numbers to relay (see the streaming end-of-stream handler) instead
-  // of falling back to the completion-text estimate. The CLIENT's own ask
-  // about what THEY get back is still honored separately: explicit
-  // `include_usage:false` suppresses the usage field on the way out; absent
-  // or `true` keeps the proxy's established always-on usage chunk.
+  // fm serve sends a REAL usage chunk on a streaming completion only when the
+  // request opts in via `stream_options.include_usage:true` — real clients (Pi
+  // included) essentially never set it. Force it upstream on every streaming request
+  // so the proxy always has fm serve's real numbers to relay (see the streaming
+  // end-of-stream handler). The CLIENT's own ask is honored separately on the way
+  // out: explicit `include_usage:false` suppresses the usage field in the response;
+  // absent or `true` keeps the always-on usage chunk.
   const clientDeclinedUsage = !!(
     parsedReq &&
     parsedReq.stream_options &&
@@ -728,16 +717,13 @@ function prepareUpstreamRequest(req, body) {
     parsedReq.stream = false;
     fixed = JSON.stringify(parsedReq);
   }
-  // Compute the full assembled size fm serve actually frames (messages + tool
-  // schemas + assistant tool_calls + per-message framing). Both success paths relay
-  // fm serve's OWN usage, so this is a fallback and an instrumentation aid: it is
-  // what gets reported when fm serve sends no usage at all (e.g. a guardrail abort
-  // that never reaches a clean finish), and it is logged on every request so a
-  // context-overflow can be tied to a real assembled size. The messages part now
-  // reproduces fm serve's prompt_tokens exactly (verified diff 0 at 1/3/5 messages,
-  // with and without a system prompt); the tool-schema part is still an estimate,
-  // since fm serve frames tools more heavily than their raw JSON. Set GAUGE_MODE=msgs
-  // for the messages-only number.
+  // The full assembled size fm serve actually frames (messages + tool schemas +
+  // assistant tool_calls + per-message framing). It is the fallback number reported
+  // when fm serve sends no usage at all (e.g. a guardrail abort), and it is logged
+  // per request so a context overflow can be tied to a real assembled size. The
+  // messages part reproduces fm serve's prompt_tokens exactly; the tool-schema part
+  // under-counts, since fm serve frames tools more heavily than their raw JSON.
+  // Set GAUGE_MODE=msgs for the messages-only number.
   let breakdown = null;
   if (isChat && parsedReq) {
     breakdown = assembledTokenBreakdown(parsedReq, fixed);
