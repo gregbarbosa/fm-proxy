@@ -32,13 +32,13 @@ version is on disk, so regenerate rather than hand-editing.
 `fm --version` does **not** exist (errors "Unknown option"). To detect when Apple ships a
 new `fm`/FoundationModels build across macOS betas, fingerprint the binary:
 
-| What | How | Beta 2 value | Beta 3 value | Beta 4 value | Beta 5 value |
-|---|---|---|---|---|---|
-| fm source version | `otool -l /usr/bin/fm \| grep -A2 LC_SOURCE_VERSION` | `2.0.55.1.402` | `2.0.59` | `2.0.62.1.402` | `2.0.68.1.401` |
-| Framework version | `plutil -p /System/Library/Frameworks/FoundationModels.framework/Resources/Info.plist \| grep CFBundleVersion` | `2.0.55.1.402` | `2.0.59` | `2.0.62.1.402` | `2.0.68.1.401` |
-| Runtime version | `codesign -dvvv /usr/bin/fm` → `Runtime Version=` | `27.0.0` | `27.0.0` | `27.0.0` | `27.0.0` |
-| Rebuild date | `ls -la /usr/bin/fm` (mtime) | Jun 19 2026 | Jul 3 2026 | Jul 17 2026 | Aug 7 2026 |
-| macOS build | `sw_vers` → `BuildVersion` | `26A5368g` (27.0 Beta 2) | `26A5378j` (27.0 Beta 3) | `26A5388g` (27.0 Beta 4) | `26A5406e` (27.0 Beta 5) |
+| What | How | Beta 2 value | Beta 3 value | Beta 4 value | Beta 5 value | Beta 6 value |
+|---|---|---|---|---|---|---|
+| fm source version | `otool -l /usr/bin/fm \| grep -A2 LC_SOURCE_VERSION` | `2.0.55.1.402` | `2.0.59` | `2.0.62.1.402` | `2.0.68.1.401` | `2.0.68.1.401` |
+| Framework version | `plutil -p /System/Library/Frameworks/FoundationModels.framework/Resources/Info.plist \| grep CFBundleVersion` | `2.0.55.1.402` | `2.0.59` | `2.0.62.1.402` | `2.0.68.1.401` | `2.0.68.1.401` |
+| Runtime version | `codesign -dvvv /usr/bin/fm` → `Runtime Version=` | `27.0.0` | `27.0.0` | `27.0.0` | `27.0.0` | `27.0.0` |
+| Rebuild date | `ls -la /usr/bin/fm` (mtime) | Jun 19 2026 | Jul 3 2026 | Jul 17 2026 | Aug 7 2026 | Aug 14 2026 |
+| macOS build | `sw_vers` → `BuildVersion` | `26A5368g` (27.0 Beta 2) | `26A5378j` (27.0 Beta 3) | `26A5388g` (27.0 Beta 4) | `26A5406e` (27.0 Beta 5) | `26A5416b` (27.0 Beta 6) |
 
 Audit recipe after any OS update:
 1. **Structure** — `python3 tools/gen-fm-docs.py --outdir /tmp/fmnew` then
@@ -265,6 +265,34 @@ The proxy is a drop-in OpenAI endpoint — point any OpenAI client at it and go:
     models or use `tool_choice:"auto"`/omit it to work around this on `system`.
   - `type: "server_error"` (`code: "internal_error"` / `"upstream_unreachable"`) —
     anything else, including the `502` when `fm serve` is down.
+
+### Beta 6 (26A5416b) — no Foundation Models change
+
+Audited 2026-08-17. **Nothing changed. `fm-proxy` v1.3.0 needs no update.**
+
+`fm` reports the same source version as Beta 5, `2.0.68.1.401`, and the framework
+matches. The binary itself was replaced (mtime Aug 14, was Aug 7), but
+`fm --experimental-dump-help` is byte-identical, so the CLI surface did not move. The
+licence agreement survives the OS update; `sudo fm license` is not needed again.
+
+Every Beta 5 finding reproduces exactly:
+
+| Check | Beta 6 result |
+|---|---|
+| Tool calling | Still broken. `tool_calls` null in 3/3, control tokens still leak into content. |
+| `stream` omitted | Still returns `text/event-stream`; `stream:false` still returns JSON. |
+| Prompt framing | `"hello world"` still frames to 57 prompt tokens. |
+| Forced `tool_choice` | Still 500 `"An unsupported generation guide was used."` |
+| `$defs` without the dialect | Still a fast 400 on `x-order`. |
+| `$defs` with the dialect | **Still hangs**, and still poisons the server. |
+| PCC from a background server | Still 503. Terminal.app is still required. |
+
+All 74 unit tests pass. All 11 features pass through the proxy against a live
+`fm serve`, including the image test at the same 191 prompt tokens.
+
+Testing note: the first request after `fm serve` starts can return no usage. Treat one
+cold-start failure as a warm-up, not a regression — a repeat run returned 57 prompt
+tokens 4 times out of 4.
 
 ### Beta 5 (fm 2.0.68.1.401, build 26A5406e) — what changed
 
