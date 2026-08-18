@@ -785,6 +785,39 @@ function prepareUpstreamRequest(req, body) {
            clientDeclinedUsage, breakdown, promptTokens };
 }
 
+// ── Attempt gate ───────────────────────────────────────────────────────────
+// Per-attempt commit/fail state for one upstream response, shared by both relays.
+// The client head is "committed" once we've written it (stream) or are about to
+// (non-stream); before commit, a failure is retryable. `fail` tears this attempt
+// down and asks the retry plan to schedule the next one — it returns true when a
+// retry was scheduled (the caller must then stop touching the stream). `aborting`
+// marks a deliberate teardown so the proxyReq error handler can ignore it.
+function createAttemptGate({ res, proxyRes, proxyReq, plan, attempt, isStream, diag }) {
+  let committed = false;
+  let aborting = false;
+  return {
+    isCommitted: () => committed,
+    markCommitted() { committed = true; },
+    isAborting: () => aborting,
+    commit() {
+      if (committed) return;
+      committed = true;
+      if (isStream) {
+        relayHead(res, proxyRes.statusCode, proxyRes.headers, null);
+        if (proxyRes.statusCode !== 200) diag(`UPSTREAM HTTP ${proxyRes.statusCode}`);
+      }
+    },
+    fail(reason) {
+      if (committed || aborting) return false;
+      if (!plan.schedule(attempt, reason)) return false;
+      aborting = true;
+      proxyRes.destroy();
+      proxyReq.destroy();
+      return true;
+    },
+  };
+}
+
 // ── Streaming relay ─────────────────────────────────────────────────────────
 // Relays one upstream SSE chat stream to the client: line assembly across chunk
 // boundaries, typed error frames, the preamble hold-back (see preBuffer), tool-call
@@ -1099,7 +1132,7 @@ const server = http.createServer((req, res) => {
     const plan = createRetryPlan(res, diag, (n) => forward(n));
 
     function forward(attempt) {
-      let aborting = false; // set when we tear the upstream down to retry
+      let gate = null; // set once a response arrives (createAttemptGate)
       const proxyReq = http.request(
         {
           hostname: "127.0.0.1",
@@ -1120,45 +1153,18 @@ const server = http.createServer((req, res) => {
             return;
           }
 
-          // The client head is "committed" once we've written it (stream) or are
-          // about to (non-stream). Before commit, a failure is retryable.
-          let committed = false;
-          const commit = () => {
-            if (committed) return;
-            committed = true;
-            if (isStream) {
-              relayHead(res, proxyRes.statusCode, proxyRes.headers, null);
-              if (proxyRes.statusCode !== 200) diag(`UPSTREAM HTTP ${proxyRes.statusCode}`);
-            }
-          };
-          // Abandon this attempt and retry if we haven't committed yet. Returns
-          // true if a retry was scheduled (caller must stop touching the stream).
-          const fail = (reason) => {
-            if (committed || aborting) return false;
-            if (!plan.schedule(attempt, reason)) return false;
-            aborting = true;
-            proxyRes.destroy();
-            proxyReq.destroy();
-            return true;
-          };
-
-          if (isStream) {
-            relayStreamingChat({ res, proxyRes, diag, commit, isCommitted: () => committed, fail,
-              isAborting: () => aborting, coercion, parsedReq, promptTokens,
-              clientDeclinedUsage, reqStart });
-            return;
-          }
-
-          relayNonStreamingChat({ res, proxyRes, diag, fail,
-            isAborting: () => aborting, markCommitted: () => { committed = true; },
-            coercion, parsedReq, promptTokens, reqStart });
+          const g = createAttemptGate({ res, proxyRes, proxyReq, plan, attempt, isStream, diag });
+          gate = g;
+          const relay = { res, proxyRes, diag, ...g, coercion, parsedReq, promptTokens, reqStart };
+          if (isStream) relayStreamingChat({ ...relay, clientDeclinedUsage });
+          else relayNonStreamingChat(relay);
         }
       );
       plan.setActiveReq(proxyReq);
       proxyReq.on("error", (e) => {
         // Transport-level failure (fm serve down / reset). Not the rate-limit
-        // signature, and aborting=true means we tore it down on purpose to retry.
-        if (aborting || plan.clientGone || res.destroyed) return;
+        // signature, and a gate teardown means we tore it down on purpose to retry.
+        if ((gate && gate.isAborting()) || plan.clientGone || res.destroyed) return;
         if (isChat) diag("UPSTREAM REQ SOCKET ERROR", `— ${e.code || ""} ${e.message}`);
         // OpenAI-shaped error object (matches the stream-exhaustion path) so clients
         // parsing error.message get a string, not undefined.
