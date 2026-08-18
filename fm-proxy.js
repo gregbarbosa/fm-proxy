@@ -525,6 +525,20 @@ function isErrorPayload(obj) {
   return !!(obj && obj.error && !(obj.choices && obj.choices.length));
 }
 
+// Classify the error an upstream frame/body carries — the shared entry for the
+// streaming data-frame, bare-JSON, and non-streaming body paths.
+function classifyErrorPayload(obj) {
+  return classifyError(obj && obj.error && obj.error.message);
+}
+
+// Shared pre-surface decision for both relays: log the classified failure, then
+// retry if transient (and the budget allows) or fall through to surface it typed.
+// Returns true when a retry was scheduled — the caller must stop touching the stream.
+function retryOrSurface(cls, ctxLabel, extra, reason, fail, diag) {
+  diag(`${cls.label} (${ctxLabel})`, extra);
+  return !!(cls.retry && fail(reason));
+}
+
 // Exported for tests when required as a module; harmless when run directly.
 if (require.main !== module) {
   module.exports = { fixTools, fixToolSchema, fixResponseFormatSchema, expandToolCallArguments, classifyError, errorFrame, fmTokenCount, _isLicenseGate };
@@ -708,7 +722,7 @@ function relayStreamingChat({ res, proxyRes, diag, commit, isCommitted, fail, is
           obj = JSON.parse(payload);
           isErr = isErrorPayload(obj);
           if (isErr) {
-            errCls = classifyError(obj.error && obj.error.message);
+            errCls = classifyErrorPayload(obj);
           } else if (obj.usage && (!obj.choices || obj.choices.length === 0)) {
             // fm serve's real usage-only chunk — capture it; never relay this frame raw (the
             // end-of-stream handler emits the client-facing chunk from these numbers).
@@ -745,7 +759,7 @@ function relayStreamingChat({ res, proxyRes, diag, commit, isCommitted, fail, is
           obj = JSON.parse(t);
           if (isErrorPayload(obj)) {
             isErr = true;
-            errCls = classifyError(obj.error && obj.error.message);
+            errCls = classifyErrorPayload(obj);
           }
         } catch { /* not an error JSON */ }
       }
@@ -760,8 +774,7 @@ function relayStreamingChat({ res, proxyRes, diag, commit, isCommitted, fail, is
       }
       // Pre-commit error: retry only if transient; terminal errors surface immediately.
       if (isErr && !isCommitted()) {
-        diag(`${errCls.label} (pre-commit)`, `— line: ${t}`);
-        if (errCls.retry && fail("upstream error frame")) return;
+        if (retryOrSurface(errCls, "pre-commit", `— line: ${t}`, "upstream error frame", fail, diag)) return;
         surfacedError = true; // retries exhausted OR terminal: forward typed
         meaningful = true;
       }
@@ -864,9 +877,9 @@ proxyRes.on("end", () => {
   try { obj = JSON.parse(raw); } catch { /* not JSON */ }
   let outStatus = proxyRes.statusCode;
   if (isErrorPayload(obj)) {
-    const cls = classifyError(obj.error && obj.error.message);
-    diag(`${cls.label} (non-stream)`, `— ${raw.slice(0, 200)}`);
+    const cls = classifyErrorPayload(obj);
     if (cls.type === "generation_aborted") {
+      diag(`${cls.label} (non-stream)`, `— ${raw.slice(0, 200)}`);
       // content_filter: a normal 200 completion finished by the filter, empty content.
       obj = {
         id: "chatcmpl-proxy", object: "chat.completion",
@@ -875,12 +888,11 @@ proxyRes.on("end", () => {
         usage: { prompt_tokens: promptTokens, completion_tokens: 0, total_tokens: promptTokens },
       };
       outStatus = 200;
-    } else {
-      if (cls.retry && fail("non-stream error")) return;
+    } else if (retryOrSurface(cls, "non-stream", `— ${raw.slice(0, 200)}`, "non-stream error", fail, diag)) {
+      return;
+    } else if (obj.error && typeof obj.error === "object") {
       // terminal (service_unavailable) OR retries exhausted (rate-limit): type it.
-      if (obj.error && typeof obj.error === "object") {
-        obj.error = { message: obj.error.message, type: cls.type, code: cls.code };
-      }
+      obj.error = { message: obj.error.message, type: cls.type, code: cls.code };
     }
   }
   let out = raw;
