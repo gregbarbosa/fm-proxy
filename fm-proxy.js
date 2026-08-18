@@ -639,6 +639,12 @@ function errorFrame(cls, msg) {
   })}\n\n`;
 }
 
+// An SSE/JSON frame is an upstream *error* (not content) when it carries a
+// top-level `error` and no usable choices — that's the rate-limit signature.
+function isErrorPayload(obj) {
+  return !!(obj && obj.error && !(obj.choices && obj.choices.length));
+}
+
 // Exported for tests when required as a module; harmless when run directly.
 if (require.main !== module) {
   module.exports = { fixTools, fixToolSchema, fixResponseFormatSchema, expandToolCallArguments, classifyError, errorFrame, fmTokenCount, _isLicenseGate };
@@ -674,6 +680,39 @@ function relayHead(res, statusCode, upstreamHeaders, bodyLen) {
   if (bodyLen == null) delete headers["content-length"];
   else headers["content-length"] = bodyLen;
   res.writeHead(statusCode, headers);
+}
+
+// Per-request retry state, shared across attempts (see forwardRequest). The
+// client response (`res`) is the one thing that persists across attempts; its
+// head is not committed until a good frame arrives, so a failed attempt can be
+// replayed invisibly. If the client disconnects, cancel any pending retry and
+// tear down the in-flight upstream request.
+function createRetryPlan(res, diag, fire) {
+  let clientGone = false;
+  let retryTimer = null;
+  let activeProxyReq = null;
+  res.on("close", () => {
+    clientGone = true;
+    if (retryTimer) { clearTimeout(retryTimer); retryTimer = null; }
+    if (activeProxyReq) activeProxyReq.destroy();
+  });
+  res.on("error", () => { if (activeProxyReq) activeProxyReq.destroy(); });
+  return {
+    get clientGone() { return clientGone; },
+    setActiveReq(proxyReq) { activeProxyReq = proxyReq; },
+    // Schedule attempt+1 with exponential backoff. Returns false (no retry
+    // scheduled) when the budget is exhausted or the client is already gone.
+    schedule(attempt, reason) {
+      if (attempt + 1 > MAX_RETRIES || clientGone) return false;
+      const delay = Math.min(RETRY_CAP_MS, RETRY_BASE_MS * 2 ** attempt);
+      diag(`RETRY ${attempt + 1}/${MAX_RETRIES}`, `after ${reason}; waiting ${delay}ms`);
+      retryTimer = setTimeout(() => {
+        retryTimer = null;
+        if (!clientGone) fire(attempt + 1);
+      }, delay);
+      return true;
+    },
+  };
 }
 
 // ── Per-request preparation ─────────────────────────────────────────────────
@@ -776,36 +815,10 @@ const server = http.createServer((req, res) => {
       (extra ? ` ${extra}` : "")
     );
 
-    // An SSE/JSON frame is an upstream *error* (not content) when it carries a
-    // top-level `error` and no usable choices — that's the rate-limit signature.
-    const isErrorPayload = (obj) =>
-      obj && obj.error && !(obj.choices && obj.choices.length);
-
-    // State shared across retry attempts. The client response (`res`) is the one
-    // thing that persists; we don't commit its head until a good frame arrives so
-    // a failed attempt can be replayed invisibly.
-    let clientGone = false;
-    let retryTimer = null;
-    let activeProxyReq = null;
-
-    // If the client disconnects, cancel any pending retry and tear down upstream.
-    res.on("close", () => {
-      clientGone = true;
-      if (retryTimer) { clearTimeout(retryTimer); retryTimer = null; }
-      if (activeProxyReq) activeProxyReq.destroy();
-    });
-    res.on("error", () => { if (activeProxyReq) activeProxyReq.destroy(); });
-
-    function scheduleRetry(attempt, reason) {
-      if (attempt + 1 > MAX_RETRIES || clientGone) return false;
-      const delay = Math.min(RETRY_CAP_MS, RETRY_BASE_MS * 2 ** attempt);
-      diag(`RETRY ${attempt + 1}/${MAX_RETRIES}`, `after ${reason}; waiting ${delay}ms`);
-      retryTimer = setTimeout(() => {
-        retryTimer = null;
-        if (!clientGone) forward(attempt + 1);
-      }, delay);
-      return true;
-    }
+    // State shared across retry attempts lives in the plan: the client response
+    // (`res`) persists, its head is committed only on a good frame, and a failed
+    // attempt is replayed invisibly via forward(attempt + 1).
+    const plan = createRetryPlan(res, diag, (n) => forward(n));
 
     function forward(attempt) {
       let aborting = false; // set when we tear the upstream down to retry
@@ -844,7 +857,7 @@ const server = http.createServer((req, res) => {
           // true if a retry was scheduled (caller must stop touching the stream).
           const fail = (reason) => {
             if (committed || aborting) return false;
-            if (!scheduleRetry(attempt, reason)) return false;
+            if (!plan.schedule(attempt, reason)) return false;
             aborting = true;
             proxyRes.destroy();
             proxyReq.destroy();
@@ -1117,11 +1130,11 @@ const server = http.createServer((req, res) => {
           });
         }
       );
-      activeProxyReq = proxyReq;
+      plan.setActiveReq(proxyReq);
       proxyReq.on("error", (e) => {
         // Transport-level failure (fm serve down / reset). Not the rate-limit
         // signature, and aborting=true means we tore it down on purpose to retry.
-        if (aborting || clientGone || res.destroyed) return;
+        if (aborting || plan.clientGone || res.destroyed) return;
         if (isChat) diag("UPSTREAM REQ SOCKET ERROR", `— ${e.code || ""} ${e.message}`);
         // OpenAI-shaped error object (matches the stream-exhaustion path) so clients
         // parsing error.message get a string, not undefined.
