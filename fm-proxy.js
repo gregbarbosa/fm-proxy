@@ -1,52 +1,36 @@
 #!/usr/bin/env node
-// fm-proxy.js - Fixes Apple fm serve compatibility with OpenAI-compatible clients
+// fm-proxy.js — OpenAI-compatible front for Apple's `fm serve`.
+// Proxies http://127.0.0.1:1977 -> http://127.0.0.1:1976 (node fm-proxy.js)
 //
-// fm serve has limited JSON Schema support for tool parameters:
-//   - "required" must be present on the root object
-//   - No anyOf, allOf, oneOf, if/then/else, not, patternProperties
-//   - enum, minimum, maximum, additionalProperties are OK
-//   - arrays of primitives are OK
-//   - Nested objects decode natively at any depth, as do array<object> and
-//     object -> array -> object. ONE shape still needs the JSON-string round-trip
-//     below: array<array<object>>, an object reached through 2+ consecutive array
-//     wrappers. See needsJsonRoundTrip.
-//   - $ref/$defs are resolved inline before simplifying (both tool parameters and
-//     response_format), since fm serve understands neither.
-//
-// This proxy simplifies tool schemas to work within these limits.
-//
-// Usage: node fm-proxy.js
-// Proxies http://127.0.0.1:1977 -> http://127.0.0.1:1976
+// fm serve's JSON Schema limits for tool parameters: root `required` must be
+// present; no anyOf/allOf/oneOf/if-then-else/not/patternProperties; nested
+// objects decode natively at any depth EXCEPT array<array<object>>, which needs
+// the JSON-string round-trip (see needsJsonRoundTrip). $ref/$defs are inlined
+// first (tool parameters and response_format) — fm serve understands neither.
 
 const http = require("http");
 const { execFileSync } = require("child_process");
 const FM_PORT = Number(process.env.FM_PORT) || 1976;
 const PROXY_PORT = Number(process.env.PROXY_PORT) || 1977;
 
-// fm serve has several DISTINCT mid-stream/request failure modes that this proxy must
-// NOT conflate — clients need to tell them apart because the remedy differs:
-//   1. Rate-limit / capacity: HTTP 200 then an error frame ("LanguageModelError -1"),
-//      rejecting at admission before any text. Transient; retry with backoff (below).
-//   2. Safety-guardrail abort: the model emits valid output, THEN fm serve interrupts
-//      ("The model's safety guardrails were triggered."). Deterministic + terminal —
-//      retrying the identical request re-fails at the identical point, so we surface it
-//      at once. Benign code triggers it; it is not a judgment about the user's content.
-//   3. Forced tool_choice on `system`: rejected with "An unsupported generation guide
-//      was used." — deterministic and permanent (`pcc` accepts it fine), never retried.
-// classifyError() maps each to an OpenAI-shaped outcome so clients can branch without
-// string-matching Apple's prose (guardrail → finish_reason:"content_filter"; rate-limit
-// → rate_limit_exceeded; unavailability → service_unavailable; tool_choice crash →
-// invalid_request_error).
+// fm serve has DISTINCT failure modes this proxy must not conflate:
+//   1. Rate-limit / capacity ("LanguageModelError -1" frame): transient — retried below.
+//   2. Safety-guardrail abort (after valid output): deterministic + terminal —
+//      never retried; benign code triggers it, not a content judgment.
+//   3. Forced tool_choice on `system`: permanent (`pcc` accepts it), never retried.
+// classifyError() maps each to an OpenAI-shaped outcome (guardrail →
+// finish_reason:"content_filter"; rate-limit → rate_limit_exceeded; unavailability
+// → service_unavailable; tool_choice → invalid_request_error) so clients branch
+// on type/finish_reason instead of string-matching Apple's prose.
 // Set FM_MAX_RETRIES=0 to disable rate-limit retries.
 const MAX_RETRIES = Number(process.env.FM_MAX_RETRIES ?? 4);
 const RETRY_BASE_MS = Number(process.env.FM_RETRY_BASE_MS ?? 1000);
 const RETRY_CAP_MS = Number(process.env.FM_RETRY_CAP_MS ?? 15000);
 
 // ── Token counting ───────────────────────────────────────────────────────────
-// fm serve reports real usage on both paths and the proxy relays it; these counters
-// are only a FALLBACK (fm serve sends no usage at all) and the assembled-size
-// instrumentation below. Exact counts from Apple's own `fm count-tokens` where
-// possible, chars/4.4 heuristic when the CLI is unavailable (e.g. the licence gate).
+// Fallback only (fm serve sends real usage; these fire when it doesn't) plus the
+// assembled-size instrumentation below. `fm count-tokens` where possible, chars/4.4
+// heuristic when the CLI is unavailable (e.g. the licence gate).
 const CHARS_PER_TOKEN = 4.4;
 // Two measured framing constants, each with one meaning:
 //   CONVERSATION_FRAMING — the fixed cost fm serve adds around a whole conversation,
@@ -82,17 +66,14 @@ function splitMessages(messages) {
   return { instructions: instr.join("\n"), prompt: prompt.join("\n") };
 }
 
-// Exact token count via `fm count-tokens -q`. Text is piped on stdin to avoid
-// argv length limits; instructions go through -i so the count includes their
-// (heavier) template wrapping, matching how the server frames a turn. Returns null
-// if the binary is missing or errors (callers fall back to the heuristic). Counts
-// are memoized: each call forks `fm` synchronously, and the heavy inputs repeat
-// verbatim every turn; bounded to keep memory flat.
+// Exact token count via `fm count-tokens -q`; stdin avoids argv limits, -i adds
+// the instructions' template wrapping. Returns null on failure (callers fall back
+// to the heuristic). Memoized — each call forks `fm` synchronously and the heavy
+// inputs repeat verbatim every turn; bounded to keep memory flat.
 const _tokenCache = new Map();
 const _TOKEN_CACHE_MAX = 512;
-// `fm count-tokens` (named `token-count` before Beta 4). This targets Beta 5 only, so
-// there is no fallback to the old name: probing it cost a second `fm` spawn on every
-// failed count and could not succeed on a supported build anyway.
+// `fm count-tokens` (named `token-count` before Beta 4); no fallback probe —
+// it would spawn `fm` a second time per count and cannot succeed anyway.
 const TOKEN_SUBCOMMAND = "count-tokens";
 // macOS 27 Beta 5 (fm 2.0.68) added a machine-wide legal-notice gate: until a
 // privileged user runs `sudo fm license`, every subcommand exits 69 and prints a
@@ -105,9 +86,7 @@ function _isLicenseGate(err) {
   return err?.status === 69 && /LEGAL NOTICE & TERMS/.test(text);
 }
 function fmTokenCount(text, instructions) {
-  // The count subcommand requires at least one input; skip the call entirely when both
-  // are empty (e.g. tool-only turns). There is no content, so the cost is framing
-  // alone, which countPromptTokens adds.
+  // Skip the call when both inputs are empty — the subcommand requires one.
   if (!text && !instructions) return 0;
   const key = (instructions || "") + "\0" + (text || "");
   if (_tokenCache.has(key)) return _tokenCache.get(key);
@@ -145,28 +124,22 @@ function fmTokenCount(text, instructions) {
   return result;
 }
 
-// Exact prompt token count for the full messages array. The fallback mirrors the
-// exact path's single per-turn framing (one overhead, not one per concatenated
-// string) by estimating the joined text in a single call.
+// Exact prompt token count for the messages array; the fallback estimates the
+// joined text in one call so framing stays a single overhead.
 function countPromptTokens(messages) {
   const { instructions, prompt } = splitMessages(messages);
   const n = fmTokenCount(prompt, instructions);
   if (n == null) return CONVERSATION_FRAMING + estimateTokens(instructions + "\n" + prompt);
-  // With -i the count applies the full conversation framing and matches fm serve's
-  // prompt_tokens exactly; without it, `count-tokens` counts raw prompt tokens only,
-  // landing a flat 54 below what fm serve frames. Add the framing back so a request
-  // with no system message reports the same number as one that has one.
+  // With -i the count matches fm serve's prompt_tokens exactly; without it the raw
+  // count sits 54 low (the conversation framing), so add it back for system-less
+  // requests.
   return instructions ? n : n + CONVERSATION_FRAMING;
 }
 
 // ── Assembled-request instrumentation ────────────────────────────────────────
-// The usage gauge (countPromptTokens) deliberately counts ONLY messages[].content
-// — that is what Pi displays. But fm serve frames a much larger prompt: the
-// flattened tool schemas, the assistant's prior tool_calls (which live in
-// m.tool_calls, not m.content), and a per-turn template wrapper on EVERY turn.
-// This measures the real assembled size so PCC's true context ceiling can be found
-// empirically: log it, then read off the value at the request where fm serve
-// reports "transcript exceeded the model's context size".
+// The gauge counts only messages[].content; fm serve also frames tool schemas,
+// prior tool_calls (m.tool_calls, not content), and a per-turn wrapper. Logging the
+// real assembled size pins PCC's empirical context ceiling.
 function assembledTokenBreakdown(parsedReq, fixedBody) {
   const messages = (parsedReq && parsedReq.messages) || [];
   // 1. messages content — the current gauge number.
@@ -209,9 +182,7 @@ function logBreakdown(tag, model, b) {
   );
 }
 
-// Per-request throughput — completion tok/s, with TTFT for streaming. Emitted on
-// every chat completion (not gated behind --verbose) as a one-line, high-signal
-// counter. Guards divide-by-zero and zero-token turns so the line stays well-formed.
+// One-line throughput counter per completion; guards zero-token/zero-time.
 function logToks(model, kind, completionTokens, durationMs, ttftMs) {
   const secs = durationMs / 1000;
   const tps = secs > 0 ? (completionTokens / secs) : 0;
@@ -241,17 +212,14 @@ const STRIP_KEYS = new Set([
   "description", ...DECORATIVE,
 ]);
 
-// Keys to drop when embedding a nested schema as a JSON string in a param
-// description. The shape only needs to convey structure + types, so prose-heavy /
-// decorative keys are pure bloat repeated for every nested field.
+// Keys dropped when embedding a schema in a description: structure only, no prose.
 const EMBED_STRIP_KEYS = new Set([
   "description", "additionalProperties", ...DECORATIVE,
 ]);
 
-// Collapse a composition keyword (anyOf/oneOf/allOf) into a single schema, then
-// re-simplify. `mergeAll` (allOf) unions every subschema with siblings winning;
-// otherwise we pick the first typed branch (or the first) and let siblings fill
-// gaps non-destructively.
+// Collapse a composition keyword into a single schema, then re-simplify: allOf
+// unions subschemas (siblings win); otherwise take the first typed branch and let
+// siblings fill gaps non-destructively.
 function flattenComposite(prop, key, mergeAll) {
   const subs = prop[key] || [];
   let merged;
@@ -275,11 +243,9 @@ function simplifyProperty(prop) {
   if (prop.oneOf) return flattenComposite(prop, "oneOf", false);
   if (prop.allOf) return flattenComposite(prop, "allOf", true);
 
-  // Nested objects decode natively now (see the header comment) — recurse rather
-  // than collapsing to string. A bare `properties` block (no explicit type) is
-  // still an object; normalize it to type:"object" so it survives unambiguously.
-  // A param matching the one still-broken shape never reaches here — needsJsonRoundTrip
-  // catches it before simplifyProperty is called.
+  // Nested objects decode natively — recurse, don't collapse to string. A bare
+  // `properties` block is still an object: normalize to type:"object". The one
+  // broken shape never reaches here (needsJsonRoundTrip catches it first).
   if (prop.type === "object" || prop.properties) {
     const result = { type: "object", properties: {} };
     for (const [name, sub] of Object.entries(prop.properties || {})) {
@@ -310,10 +276,8 @@ function simplifyProperty(prop) {
   return result;
 }
 
-// True if `prop`, once you strip away any number of array wrappers, bottoms out
-// in an object type. Used only to test the leaf of a run of 2+ consecutive array
-// wrappers (see needsJsonRoundTrip) — array<array<primitive>> is fine, but
-// array<array<object>> is not, so the leaf type is what decides it.
+// True if `prop` bottoms out in an object through any number of array wrappers —
+// decides array<array<...>> round-tripping (see needsJsonRoundTrip).
 function leafIsObjectThroughArrays(prop) {
   if (!prop || typeof prop !== "object") return false;
   if (prop.type === "array") return leafIsObjectThroughArrays(prop.items);
@@ -350,12 +314,10 @@ function fixToolSchema(schema) {
     return { schema: result, jsonFields };
   }
 
-  // Resolve $refs first. simplifyProperty strips `$ref` and `$defs` as unsupported
-  // keywords, which silently flattened a referenced parameter to `{}` — an empty,
-  // typeless schema that fm serve is still told is required. pydantic's
-  // .model_json_schema() and zod-to-json-schema emit exactly that shape for any named
-  // type, so this hit real tool definitions. Inlining first gives the nesting fm serve
-  // decodes natively. Cyclic refs cannot be inlined and keep the old behaviour.
+  // Resolve $refs first: simplifyProperty strips $ref/$defs, which would flatten a
+  // referenced param to `{}` — the exact shape pydantic/zod emit for named types.
+  // Inlining gives fm serve the nesting it decodes natively; cyclic refs keep the
+  // old behaviour.
   if (schema.$defs) schema = inlineDefs(schema) || schema;
 
   result.properties = {};
@@ -377,10 +339,9 @@ function fixToolSchema(schema) {
       result.properties[name] = simplifyProperty(prop);
     }
   }
-  // Preserve the caller's `required` list. Dropping it told fm serve every param
-  // was optional, so the model would emit partial/empty tool calls (e.g. edit with
-  // `{}`) that the client then rejects against the real schema. JSON-round-tripped
-  // params keep their name (only the value becomes a string), so names carry over.
+  // Preserve the caller's `required` — dropping it made params optional and the
+  // model emitted partial/empty tool calls. Round-tripped params keep their name,
+  // so names carry over.
   if (Array.isArray(schema.required)) {
     result.required = schema.required.filter((n) => n in result.properties);
   }
@@ -388,14 +349,12 @@ function fixToolSchema(schema) {
 }
 
 // ── response_format schema dialect (structured output) ──────────────────────
-// fm serve's constrained-decoding dialect requires title + x-order + required +
-// additionalProperties on every object schema reached through `$defs`; without them
-// it 400s with a DecodingError naming the exact missing key. Objects reached only
-// through inline `properties` nesting need none of it. Inlining $refs (see below) is
-// the primary path; dialect injection survives only as the cyclic-ref fallback.
-// Re-verify: send a $defs/$ref response_format without these keys → 400 naming the
-// missing key; with them on macOS 27 Beta 5 → `system` engine hangs and the server
-// must be restarted.
+// fm serve's constrained-decoding dialect needs title + x-order + required +
+// additionalProperties on every object reached through `$defs`; a missing key 400s
+// with a DecodingError naming it. Inline-nested objects need none of it, so inlining
+// (below) is the primary path; this survives only for cyclic refs.
+// Re-verify: undecorated $defs → 400; decorated $defs on Beta 5 hangs `system`
+// until the server is restarted.
 function isDialectObjectSchema(s) {
   return !!(s && typeof s === "object" && (s.type === "object" || s.properties));
 }
@@ -404,10 +363,8 @@ function capitalizeTitle(name) {
   return name ? name[0].toUpperCase() + name.slice(1) : "Object";
 }
 
-// Recursively injects the dialect into every object schema under `node` (only ever
-// walked from inside $defs -- see fixResponseFormatSchema). `titleHint` names this
-// node if it turns out to be an object: the $defs key for a top-level definition, or
-// the capitalized property name for anything nested inside one.
+// Recursively inject the dialect into object schemas under `node` (only ever
+// walked from inside $defs). `titleHint` names this node if it is an object.
 function decorateDialect(node, titleHint) {
   if (!node || typeof node !== "object" || Array.isArray(node)) return;
   if (node.items) decorateDialect(node.items, titleHint);
@@ -454,12 +411,10 @@ function inlineDefs(schema) {
   return bailed ? null : result;
 }
 
-// Normalise a response_format `schema` into something fm serve accepts.
-// Preferred path: inline the $refs and delete $defs — an object reached only through
-// inline `properties` nesting needs NO dialect keys, so this avoids both upstream
-// failures (the 400 for missing keys, and the Beta-5 hang when they are present).
-// Fallback: a cyclic or unresolvable $ref cannot be inlined (a self-referencing tree
-// would expand forever), so those keep the old dialect injection above.
+// Normalise a response_format schema: inline $refs and drop $defs (avoids both the
+// 400 for missing dialect keys and the Beta-5 hang when they are present).
+// Cyclic/unresolvable refs cannot be inlined (endless expansion) — those fall back
+// to dialect injection above.
 function fixResponseFormatSchema(schema) {
   if (!schema || typeof schema !== "object" || !schema.$defs) return schema;
   const inlined = inlineDefs(schema);
@@ -468,9 +423,8 @@ function fixResponseFormatSchema(schema) {
   return schema;
 }
 
-// Rewrites request tools into fm-serve-compatible schemas. Returns the rewritten
-// body, a coercion map (toolName -> [jsonField names]) for re-expansion on the
-// response, and the parsed request object (or null) so callers needn't re-parse.
+// Rewrite request tools into fm-serve-compatible schemas. Returns the rewritten
+// body, a coercion map for re-expansion, and the parsed request (or null).
 function fixTools(body) {
   try {
     const parsed = JSON.parse(body);
@@ -482,13 +436,11 @@ function fixTools(body) {
           coercion[tool.function.name] = jsonFields;
         }
         // fm serve 400s the ENTIRE request ("Invalid JSON: The data couldn't be read
-        // because it is missing.") if ANY tool's function.description is absent or
-        // null — independent of that tool's parameters shape, tool_choice, or which
-        // tool is actually called. An empty string is accepted. OpenAI's spec makes
-        // description optional, so a compliant client can send exactly the shape that
-        // breaks fm serve; backfill it here rather than erroring.
-        // Re-verify: POST a tools array with one description-less function → the
-        // whole request 400s even if the model never calls that tool.
+        // because it is missing.") if ANY tool's function.description is absent or null —
+        // regardless of parameters shape, tool_choice, or which tool is called; an empty
+        // string is accepted. OpenAI's spec makes description optional, so backfill it
+        // here rather than erroring. Re-verify: one description-less tool → whole request
+        // 400s even if that tool is never called.
         const description = tool.function?.description;
         return {
           ...tool,
@@ -522,9 +474,8 @@ function expandToolCallArguments(toolName, argsStr, coercion) {
     for (const f of fields) {
       if (typeof obj[f] === "string") {
         try { obj[f] = JSON.parse(obj[f]); changed = true; } catch {
-          // Beta 4 model quirk (seen live): HTML entities (&quot; etc.) in place
-          // of escaped quotes inside the round-tripped JSON string. One-shot
-          // entity decode, then retry; still-unparseable values are left as-is.
+          // Model quirk (seen live): HTML entities where escaped quotes should be inside
+          // the round-tripped string. One-shot entity decode, then retry.
           const decoded = obj[f]
             .replace(/&quot;/g, '"').replace(/&#34;/g, '"')
             .replace(/&apos;/g, "'").replace(/&#39;/g, "'")
@@ -539,9 +490,7 @@ function expandToolCallArguments(toolName, argsStr, coercion) {
   }
 }
 
-// Apply expandToolCallArguments to every tool_call in an OpenAI tool_calls array
-// (both streaming delta and non-streaming message shapes). Mutates in place;
-// returns true if any arguments string was rewritten.
+// Apply expandToolCallArguments across a tool_calls array; true if any rewritten.
 function rewriteToolCalls(toolCalls, coercion) {
   let changed = false;
   for (const tc of toolCalls) {
@@ -616,17 +565,14 @@ if (require.main !== module) {
   module.exports = { fixTools, fixToolSchema, fixResponseFormatSchema, expandToolCallArguments, classifyError, errorFrame, fmTokenCount, _isLicenseGate };
 }
 
-// CORS so browser-based OpenAI clients (open-webui, web apps hitting the base URL
-// directly) clear their preflight. Origin is `*` by default; override with
-// CORS_ORIGIN. Applied to every response via relayHead and the raw writeHead paths
-// so no response can slip out without it.
+// CORS so browser-based OpenAI clients clear preflight. `*` by default, override
+// with CORS_ORIGIN; applied to every response.
 const CORS_ORIGIN = process.env.CORS_ORIGIN || "*";
 const CORS_HEADERS = {
   "access-control-allow-origin": CORS_ORIGIN,
   "access-control-allow-methods": "GET, POST, OPTIONS",
-  // `*` covers Content-Type and the OpenAI SDK's x-stainless-* headers, but per
-  // the Fetch spec the wildcard does NOT cover Authorization — it must be named
-  // explicitly or browser preflight for the API key would fail.
+  // `*` doesn't cover Authorization per the Fetch spec, so name it explicitly
+  // alongside; the OpenAI SDK's x-stainless-* headers clear via the wildcard.
   "access-control-allow-headers": "Authorization, *",
   "access-control-max-age": "86400", // cache preflight a day; fewer round-trips
 };
@@ -634,25 +580,20 @@ function setCors(res) {
   for (const [k, v] of Object.entries(CORS_HEADERS)) res.setHeader(k, v);
 }
 
-// Copy upstream headers and either set Content-Length (non-stream, known body) or
-// drop it (stream, chunked). One place so the two response paths can't desync.
-// CORS headers are merged in here so every committed response carries them.
+// Copy upstream headers; set Content-Length (buffered) or drop it (chunked).
 function relayHead(res, statusCode, upstreamHeaders, bodyLen) {
   const headers = { ...upstreamHeaders, ...CORS_HEADERS };
-  // The proxy manages its own framing: it either sets Content-Length (buffered
-  // body) or streams chunked. Never relay upstream's Transfer-Encoding, or the
-  // response carries both CL and TE — illegal framing the client can't parse.
+  // Never relay upstream's Transfer-Encoding alongside our own Content-Length —
+  // CL+TE together is illegal framing the client can't parse.
   delete headers["transfer-encoding"];
   if (bodyLen == null) delete headers["content-length"];
   else headers["content-length"] = bodyLen;
   res.writeHead(statusCode, headers);
 }
 
-// Per-request retry state, shared across attempts (see forwardRequest). The
-// client response (`res`) is the one thing that persists across attempts; its
-// head is not committed until a good frame arrives, so a failed attempt can be
-// replayed invisibly. If the client disconnects, cancel any pending retry and
-// tear down the in-flight upstream request.
+// Per-request retry state across attempts. The client response persists; its head
+// is not committed until a good frame arrives, so a failed attempt replays
+// invisibly. Client disconnect cancels any pending retry and tears down upstream.
 function createRetryPlan(res, diag, fire) {
   let clientGone = false;
   let retryTimer = null;
@@ -682,22 +623,18 @@ function createRetryPlan(res, diag, fire) {
 }
 
 // ── Per-request preparation ─────────────────────────────────────────────────
-// Build the upstream payload and per-request context from the client's raw body:
-// fixTools' schema rewrites, the stream fixups below, the tool-call coercion map,
-// and the assembled-size instrumentation. Pure bookkeeping — no I/O except the
-// [assembled] log line, which fires once per request here rather than per attempt.
+// Build the upstream payload + context: fixTools rewrites, stream fixups, coercion
+// map, assembled-size instrumentation. Logs once per request.
 function prepareUpstreamRequest(req, body) {
   const { body: toolFixed, coercion, parsed: parsedReq } = fixTools(body);
 
   const isChat = !!(req.url && req.url.includes("/chat/completions"));
   const isStream = !!(parsedReq && parsedReq.stream);
 
-  // fm serve sends a REAL usage chunk on a streaming completion only when the
-  // request opts in via `stream_options.include_usage:true` — real clients (Pi
-  // included) essentially never set it. Force it upstream on every streaming request
-  // so the proxy always has fm serve's real numbers to relay (see the streaming
-  // end-of-stream handler). The CLIENT's own ask is honored separately on the way
-  // out: explicit `include_usage:false` suppresses the usage field in the response;
+  // fm serve sends a real usage chunk on streaming only when the request opts in via
+  // stream_options.include_usage — real clients never set it. Force it upstream on
+  // every streaming request. The client's own opt-out is honored on the way OUT:
+  // explicit `include_usage:false` suppresses the usage field in the response;
   // absent or `true` keeps the always-on usage chunk.
   const clientDeclinedUsage = !!(
     parsedReq &&
@@ -709,21 +646,18 @@ function prepareUpstreamRequest(req, body) {
     parsedReq.stream_options = { ...(parsedReq.stream_options || {}), include_usage: true };
     fixed = JSON.stringify(parsedReq);
   } else if (isChat && parsedReq && parsedReq.stream === undefined) {
-    // macOS 27 Beta 5 (fm 2.0.68) flipped the default: a chat request that OMITS
-    // `stream` now comes back as text/event-stream, where every earlier build (and
-    // the OpenAI spec) returns a single JSON object. Only an explicit
-    // `stream:false` still selects JSON. Clients that never set the field — most
-    // OpenAI SDKs — would get an SSE body they cannot parse, so pin it here.
+    // Beta 5 flipped the default: a chat request that OMITS `stream` comes back as
+    // text/event-stream, not the single JSON object the OpenAI spec returns. Only
+    // explicit `stream:false` selects JSON, so pin it for clients that never set the
+    // field.
     parsedReq.stream = false;
     fixed = JSON.stringify(parsedReq);
   }
-  // The full assembled size fm serve actually frames (messages + tool schemas +
-  // assistant tool_calls + per-message framing). It is the fallback number reported
-  // when fm serve sends no usage at all (e.g. a guardrail abort), and it is logged
-  // per request so a context overflow can be tied to a real assembled size. The
-  // messages part reproduces fm serve's prompt_tokens exactly; the tool-schema part
-  // under-counts, since fm serve frames tools more heavily than their raw JSON.
-  // Set GAUGE_MODE=msgs for the messages-only number.
+  // The full assembled size (messages + tool schemas + tool_calls + per-message
+  // framing): the fallback number when fm serve sends no usage (e.g. guardrail
+  // abort), logged per request to tie overflows to a real size. Messages match fm
+  // serve exactly; the tool-schema part under-counts. GAUGE_MODE=msgs selects the
+  // messages-only number.
   let breakdown = null;
   if (isChat && parsedReq) {
     breakdown = assembledTokenBreakdown(parsedReq, fixed);
@@ -735,10 +669,9 @@ function prepareUpstreamRequest(req, body) {
       ? breakdown.msgTokens
       : breakdown.assembledTotal;
 
-  // We always forward a fully-buffered body and set our own Content-Length, so
-  // any inbound Transfer-Encoding (e.g. a client that streamed its upload with
-  // chunked encoding) must be dropped — keeping both is illegal framing and
-  // upstream rejects it with HPE_INVALID_CONTENT_LENGTH.
+  // Always forward a fully-buffered body with our own Content-Length; drop any
+  // inbound Transfer-Encoding — keeping both is illegal framing and upstream rejects
+  // it with HPE_INVALID_CONTENT_LENGTH.
   const upstreamHeaders = { ...req.headers, "content-length": Buffer.byteLength(fixed) };
   delete upstreamHeaders["transfer-encoding"];
   return { fixed, upstreamHeaders, coercion, parsedReq, isChat, isStream,
@@ -746,12 +679,10 @@ function prepareUpstreamRequest(req, body) {
 }
 
 // ── Attempt gate ───────────────────────────────────────────────────────────
-// Per-attempt commit/fail state for one upstream response, shared by both relays.
-// The client head is "committed" once we've written it (stream) or are about to
-// (non-stream); before commit, a failure is retryable. `fail` tears this attempt
-// down and asks the retry plan to schedule the next one — it returns true when a
-// retry was scheduled (the caller must then stop touching the stream). `aborting`
-// marks a deliberate teardown so the proxyReq error handler can ignore it.
+// Per-attempt commit/fail state shared by both relays: before the client head is
+// committed a failure is retryable; `fail` tears this attempt down and schedules
+// the next via the plan (true = retry scheduled, stop touching the stream).
+// `aborting` marks deliberate teardown for the error handler.
 function createAttemptGate({ res, proxyRes, proxyReq, plan, attempt, isStream, diag }) {
   let committed = false;
   let aborting = false;
@@ -779,19 +710,12 @@ function createAttemptGate({ res, proxyRes, proxyReq, plan, attempt, isStream, d
 }
 
 // ── Streaming relay ─────────────────────────────────────────────────────────
-// Relays one upstream SSE chat stream to the client: line assembly across chunk
-// boundaries, typed error frames, the preamble hold-back (see preBuffer), tool-call
-// arg re-expansion, and the final usage/finish chunk. All per-attempt stream state
-// lives in this closure; commit/fail/isAborting come from forward's attempt scope
-// so retry semantics are unchanged.
+// Relays one upstream SSE chat stream: line pump, preamble hold-back, typed error
+// frames, guardrail abort, final usage/finish chunk.
 function relayStreamingChat({ res, proxyRes, diag, commit, isCommitted, fail, isAborting, coercion,
                               parsedReq, promptTokens, clientDeclinedUsage, reqStart }) {
-  // Streaming: fm serve sends a real final usage-only chunk now that we
-  // force stream_options.include_usage upstream (see realUsage below).
-  // Still accumulate completion text as a fallback estimate for upstreams
-  // that ignore the flag, and inject our own final chunk before [DONE]
-  // either way (so clients always see usage, or real numbers when we have
-  // them — see the end-of-stream handler).
+  // fm serve's real final usage chunk needs the forced include_usage upstream;
+  // completion text is still a fallback estimate for upstreams that ignore it.
   let completionText = "";
   let realUsage = null;   // fm serve's own usage object, if it sent one
   let sawFinish = false;  // a clean finish_reason or [DONE] arrived
@@ -802,11 +726,10 @@ function relayStreamingChat({ res, proxyRes, diag, commit, isCommitted, fail, is
   let rawTail = "";       // last bytes of the upstream stream, for failure forensics
   let surfacedError = false; // we already forwarded a typed error frame
   let abortFinishReason = null; // set to "content_filter" on a guardrail abort
-  // PCC always opens a stream with an empty {"delta":{"role":"assistant"}}
-  // preamble, THEN either real output or an error frame. We must NOT commit
-  // the client head on that preamble, or an error arriving right after it
-  // would look post-commit and be unretryable. So buffer pre-output frames
-  // and only commit on the first meaningful frame (content/tool_calls/finish).
+  // PCC opens streams with an empty {"delta":{"role":"assistant"}} preamble, THEN
+  // either output or an error frame. Don't commit the head on the preamble or a
+  // following error looks post-commit and unretryable — buffer pre-output frames and
+  // commit on the first meaningful one.
   const preBuffer = [];
   const flushPre = () => { for (const l of preBuffer) res.write(l); preBuffer.length = 0; };
   const commitFlush = () => { commit(); flushPre(); };
@@ -833,12 +756,9 @@ function relayStreamingChat({ res, proxyRes, diag, commit, isCommitted, fail, is
           if (isErr) {
             errCls = classifyError(obj.error && obj.error.message);
           } else if (obj.usage && (!obj.choices || obj.choices.length === 0)) {
-            // fm serve's real final usage-only chunk (choices:[], usage:{...}),
-            // present because we forced stream_options.include_usage upstream.
-            // Capture it; never relay this raw frame — the end-of-stream handler
-            // below emits the client-facing chunk using these real numbers (or
-            // the completionText-based estimate as a fallback if this never
-            // arrives), respecting the client's own usage opt-in/opt-out.
+            // fm serve's real usage-only chunk (choices:[], usage) — capture it; never relay
+            // this frame raw. The end-of-stream handler emits the client-facing chunk from
+            // these numbers.
             realUsage = obj.usage;
             continue;
           } else {
@@ -866,10 +786,9 @@ function relayStreamingChat({ res, proxyRes, diag, commit, isCommitted, fail, is
         isErr = true; // raw (non-data) error line
         errCls = classifyError(t);
       } else if (t.startsWith("{")) {
-        // fm serve returns non-SSE errors (e.g. HTTP 503 service_unavailable
-        // for a missing-PCC-attribution `pcc` request) as BARE JSON, not a
-        // `data:` frame. Parse it so we classify + surface the typed error
-        // instead of treating the stream as empty and retrying blindly.
+        // fm serve returns non-SSE errors (e.g. the 503 for missing PCC attribution) as
+        // BARE JSON, not a data: frame — parse and classify it instead of treating the
+        // stream as empty and retrying blindly.
         try {
           obj = JSON.parse(t);
           if (isErrorPayload(obj)) {
@@ -878,21 +797,18 @@ function relayStreamingChat({ res, proxyRes, diag, commit, isCommitted, fail, is
           }
         } catch { /* not an error JSON */ }
       }
-      // Safety-guardrail abort → OpenAI content_filter: keep any partial that
-      // was already streamed, end the stream with finish_reason:"content_filter",
-      // and emit NO error frame (so SDK clients get the partial + a documented
-      // finish_reason instead of an exception). Only the guardrail maps to
-      // content_filter; rate-limit and service_unavailable stay typed errors
-      // (they're HTTP 429/503 analogues, not content filtering).
+      // Safety-guardrail abort → OpenAI content_filter: keep any partial, end with
+      // finish_reason:"content_filter", no error frame (SDKs get the partial + a
+      // documented finish_reason instead of an exception). Only the guardrail maps
+      // here; rate-limit/service_unavailable stay typed errors.
       if (isErr && errCls && errCls.type === "generation_aborted") {
         diag(`${errCls.label}`, `— line: ${t}`);
         abortFinishReason = "content_filter";
         sawFinish = true;      // terminate the stream cleanly (no retry)
         continue;              // drop the error frame; end handler emits the finish
       }
-      // Pre-commit upstream error: retry only if transient (rate-limit). A
-      // safety-guardrail abort is terminal — retrying re-fails identically —
-      // so surface it immediately instead of burning the retry budget.
+      // Pre-commit upstream error: retry only if transient (rate-limit); terminal
+      // errors surface immediately instead of burning the retry budget.
       if (isErr && !isCommitted()) {
         diag(`${errCls.label} (pre-commit)`, `— line: ${t}`);
         if (errCls.retry && fail("upstream error frame")) return;
@@ -906,9 +822,7 @@ function relayStreamingChat({ res, proxyRes, diag, commit, isCommitted, fail, is
         continue;
       }
       if (!isCommitted()) commitFlush();
-      // Forward content as-is; rewrite error frames to a typed OpenAI error so
-      // clients can branch on `type` (rate_limit_exceeded / generation_aborted)
-      // without string-matching Apple's message.
+      // Forward content as-is; rewrite error frames to typed OpenAI errors.
       if (isErr) {
         const errMsg = (obj && obj.error && obj.error.message) || t;
         res.write(errorFrame(errCls, errMsg));
@@ -944,9 +858,7 @@ function relayStreamingChat({ res, proxyRes, diag, commit, isCommitted, fail, is
       diag("UPSTREAM STREAM ABORTED (no finish)",
         `completionChars=${completionText.length} rawTail=${JSON.stringify(rawTail)}`);
     }
-    // Finished cleanly but produced neither text nor tool_calls — the
-    // error path (error frame then [DONE]) that exhausted retries. Tool-
-    // call turns set producedOutput, so they don't trip this.
+    // Finished but no output: the error path that exhausted retries.
     if (sawFinish && !producedOutput) {
       diag("EMPTY COMPLETION (finished, no output)",
         `rawTail=${JSON.stringify(rawTail)}`);
@@ -960,12 +872,9 @@ function relayStreamingChat({ res, proxyRes, diag, commit, isCommitted, fail, is
       tFirstToken != null ? nowEnd - tFirstToken : nowEnd - reqStart,
       tFirstToken != null ? tFirstToken - reqStart : null,
     );
-    // Prefer fm serve's own real usage (captured above from the frame we
-    // forced upstream via stream_options.include_usage) over the
-    // completionText-based estimate — the same "trust fm serve's own
-    // number" upgrade already applied to the non-streaming path. The
-    // estimate only fires as a fallback when no usage frame arrives at all
-    // (e.g. a guardrail abort that never reaches a clean finish).
+    // Prefer fm serve's real usage over the completionText estimate; the estimate
+    // only fires when no usage frame arrives at all (e.g. a guardrail abort that
+    // never finishes).
     const usage = realUsage || {
       prompt_tokens: promptTokens,
       completion_tokens: completionTokens,
@@ -979,16 +888,12 @@ function relayStreamingChat({ res, proxyRes, diag, commit, isCommitted, fail, is
       model: meta.model || (parsedReq && parsedReq.model) || "unknown",
       choices: [{ index: 0, delta: {}, finish_reason: abortFinishReason }],
     };
-    // We always suppress the upstream [DONE] and re-emit our own final
-    // chunk, so clients (Pi) that read the last chunk get a real
-    // prompt_tokens. The client's own stream_options.include_usage opt-out
-    // is honored on the way OUT even though we always force it upstream:
-    // explicit `false` gets no usage field (vanilla OpenAI shape); absent
-    // or `true` keeps the established always-on usage chunk. The
-    // finish_reason itself must still go out even when usage is declined —
-    // for a content_filter abort it's ONLY ever carried by this chunk (the
-    // abort's own error frame is swallowed above), so we can't just drop
-    // the whole chunk on an opt-out.
+    // Always suppress upstream's [DONE] and re-emit our own final chunk so clients
+    // reading the last chunk get real usage. An explicit include_usage:false gets no
+    // usage field (vanilla OpenAI shape); absent or true keeps the always-on chunk.
+    // The finish_reason must still go out on an opt-out — for a content_filter abort
+    // it is ONLY carried by this chunk (the abort's own error frame is swallowed
+    // above), so the chunk can't be dropped wholesale.
     if (!clientDeclinedUsage) {
       res.write(`data: ${JSON.stringify({ ...finishChunk, usage })}\n\n`);
     } else if (abortFinishReason) {
@@ -1000,9 +905,8 @@ function relayStreamingChat({ res, proxyRes, diag, commit, isCommitted, fail, is
 }
 
 // ── Non-streaming relay ─────────────────────────────────────────────────────
-// Buffers the whole upstream reply (so a failure is still retryable via `fail`),
-// rewrites guardrail aborts into a content_filter completion, re-expands
-// JSON-string tool-call args, and relays fm serve's own usage untouched.
+// Buffer the whole reply (failures stay retryable via `fail`), rewrite guardrail
+// aborts to content_filter completions, re-expand tool-call args.
 function relayNonStreamingChat({ res, proxyRes, diag, fail, isAborting, markCommitted,
                                  coercion, parsedReq, promptTokens, reqStart }) {
 // Non-streaming: buffer fully (so we can still retry), then fix usage.
@@ -1017,9 +921,8 @@ proxyRes.on("end", () => {
     const cls = classifyError(obj.error && obj.error.message);
     diag(`${cls.label} (non-stream)`, `— ${raw.slice(0, 200)}`);
     if (cls.type === "generation_aborted") {
-      // content_filter: return a normal completion finished by the filter
-      // (OpenAI-aligned), not an error. fm serve's non-stream error carries
-      // no partial, so content is empty; status is 200 (it's a valid completion).
+      // content_filter: return a normal completion finished by the filter (OpenAI-
+      // aligned), 200, empty content — fm serve's non-stream error carries no partial.
       obj = {
         id: "chatcmpl-proxy", object: "chat.completion",
         model: (parsedReq && parsedReq.model) || "unknown",
@@ -1037,11 +940,8 @@ proxyRes.on("end", () => {
   }
   let out = raw;
   if (obj) {
-    // fm serve 2.0.59+ (macOS 27 Beta 3) reports real, accurate non-streaming
-    // usage (verified live against `fm count-tokens`) — no override needed here
-    // anymore. Streaming still sends none at all, so that path (below) still
-    // synthesizes it from promptTokens/completionTokens.
-    // Re-expand JSON-string tool-call args back to real objects.
+    // fm serve's non-streaming usage is accurate — pass it through untouched
+    // (streaming synthesizes it instead). Re-expand tool-call args.
     const msg = obj.choices && obj.choices[0] && obj.choices[0].message;
     if (msg && Array.isArray(msg.tool_calls)) rewriteToolCalls(msg.tool_calls, coercion);
     out = JSON.stringify(obj);
@@ -1077,18 +977,14 @@ const server = http.createServer((req, res) => {
     const { fixed, upstreamHeaders, coercion, parsedReq, isChat, isStream,
             clientDeclinedUsage, breakdown, promptTokens } = ctx;
 
-    // One-line diagnostic binding a failure to this request's real assembled size
-    // (the empirical PCC ceiling) — shared by the HTTP-status, context-overflow,
-    // and stream-aborted cases so they stay in sync.
+    // One-line diagnostic binding a failure to this request's assembled size.
     const diag = (label, extra = "") => console.error(
       `[assembled] *** ${label} *** assembled=` +
       `${breakdown ? breakdown.assembledTotal : "?"} (gauge ${promptTokens})` +
       (extra ? ` ${extra}` : "")
     );
 
-    // State shared across retry attempts lives in the plan: the client response
-    // (`res`) persists, its head is committed only on a good frame, and a failed
-    // attempt is replayed invisibly via forward(attempt + 1).
+    // Retry state across attempts; forward(attempt+1) replays a failed attempt.
     const plan = createRetryPlan(res, diag, (n) => forward(n));
 
     function forward(attempt) {
