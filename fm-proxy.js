@@ -614,7 +614,25 @@ function prepareUpstreamRequest(req, body) {
     parsedReq.stream_options &&
     parsedReq.stream_options.include_usage === false
   );
+  // fm serve SILENTLY IGNORES `max_tokens` — the standard OpenAI field, and what most
+  // SDKs send. Only `max_completion_tokens` truncates. Verified live: max_tokens:10 on a
+  // "count to 100" prompt returned 391 completion tokens, max_completion_tokens:10
+  // returned 10. Left alone, a client that sets a cap gets unbounded generation, which
+  // on `pcc` also burns context against its ~32k ceiling. Map it across, without
+  // overriding an explicit max_completion_tokens.
+  let cappedAt = null;
+  if (isChat && parsedReq) {
+    const mc = parsedReq.max_completion_tokens;
+    const mt = parsedReq.max_tokens;
+    if (mc == null && Number.isFinite(Number(mt))) {
+      parsedReq.max_completion_tokens = Number(mt);
+      delete parsedReq.max_tokens;
+    }
+    const cap = Number(parsedReq.max_completion_tokens);
+    if (Number.isFinite(cap)) cappedAt = cap;
+  }
   let fixed = toolFixed;
+  if (cappedAt != null && parsedReq) fixed = JSON.stringify(parsedReq);
   if (isStream && parsedReq) {
     parsedReq.stream_options = { ...(parsedReq.stream_options || {}), include_usage: true };
     fixed = JSON.stringify(parsedReq);
@@ -647,7 +665,7 @@ function prepareUpstreamRequest(req, body) {
   const upstreamHeaders = { ...req.headers, "content-length": Buffer.byteLength(fixed) };
   delete upstreamHeaders["transfer-encoding"];
   return { fixed, upstreamHeaders, coercion, parsedReq, isChat, isStream,
-           clientDeclinedUsage, breakdown, promptTokens };
+           clientDeclinedUsage, breakdown, promptTokens, cappedAt };
 }
 
 // ── Attempt gate ───────────────────────────────────────────────────────────
@@ -683,7 +701,7 @@ function createAttemptGate({ res, proxyRes, proxyReq, plan, attempt, isStream, d
 // ── Streaming relay ─────────────────────────────────────────────────────────
 // Relays one upstream SSE chat stream: line pump, preamble hold-back, typed error
 // frames, guardrail abort, final usage/finish chunk.
-function relayStreamingChat({ res, proxyRes, diag, commit, isCommitted, fail, isAborting, coercion,
+function relayStreamingChat({ res, proxyRes, diag, commit, isCommitted, fail, isAborting, coercion, cappedAt,
                               parsedReq, promptTokens, clientDeclinedUsage, reqStart }) {
   // Real usage needs the forced include_usage upstream; completionText stays a fallback.
   let completionText = "";
@@ -849,6 +867,12 @@ function relayStreamingChat({ res, proxyRes, diag, commit, isCommitted, fail, is
       model: meta.model || (parsedReq && parsedReq.model) || "unknown",
       choices: [{ index: 0, delta: {}, finish_reason: abortFinishReason }],
     };
+    // Same truncation mislabel as the non-streaming path: fm serve says "stop" even when
+    // it stopped at the cap. Only rewrite a plain stop — never an abort's content_filter.
+    if (cappedAt != null && !abortFinishReason &&
+        Number(usage.completion_tokens) >= Number(cappedAt)) {
+      finishChunk.choices[0].finish_reason = "length";
+    }
     // Always suppress upstream's [DONE] and re-emit our own final chunk so clients get
     // real usage. Explicit include_usage:false → no usage field (vanilla OpenAI shape);
     // absent/true keeps the always-on chunk. finish_reason must still go out on an
@@ -867,8 +891,23 @@ function relayStreamingChat({ res, proxyRes, diag, commit, isCommitted, fail, is
 // ── Non-streaming relay ─────────────────────────────────────────────────────
 // Buffer the whole reply (failures stay retryable), rewrite guardrail aborts to
 // content_filter completions, re-expand tool-call args.
+// fm serve reports finish_reason:"stop" even when it truncated at the cap, so a client
+// cannot tell a complete answer from a cut-off one. Verified live: capped at 10 tokens,
+// the reply "1, 2, 3, 4" came back as "stop". Rewrite to OpenAI's "length" when the
+// completion reached the cap.
+//
+// The cap is APPROXIMATE — fm serve overshoots it (measured: cap 8 -> 16 tokens,
+// cap 16 -> 22, cap 10 -> 10). So compare with >=, never ==. A naturally-complete reply
+// that happens to land on the cap is reported as "length"; OpenAI has the same
+// ambiguity, and under-reporting a truncation is the worse error.
+function applyLengthFinish(obj, cappedAt) {
+  if (cappedAt == null || !obj || !obj.usage || !Array.isArray(obj.choices)) return;
+  if (Number(obj.usage.completion_tokens) < Number(cappedAt)) return;
+  for (const c of obj.choices) if (c && c.finish_reason === "stop") c.finish_reason = "length";
+}
+
 function relayNonStreamingChat({ res, proxyRes, diag, fail, isAborting, markCommitted,
-                                 coercion, parsedReq, promptTokens, reqStart }) {
+                                 coercion, parsedReq, promptTokens, reqStart, cappedAt }) {
 // Non-streaming: buffer fully (so we can still retry), then fix usage.
 let raw = "";
 proxyRes.on("data", (c) => (raw += c));
@@ -901,6 +940,7 @@ proxyRes.on("end", () => {
     // fm serve's non-streaming usage is accurate — pass it through untouched.
     const msg = obj.choices && obj.choices[0] && obj.choices[0].message;
     if (msg && Array.isArray(msg.tool_calls)) rewriteToolCalls(msg.tool_calls, coercion);
+    applyLengthFinish(obj, cappedAt);
     out = JSON.stringify(obj);
   }
   // Throughput: duration is request-received → now (upstream buffers the whole reply).
@@ -930,7 +970,7 @@ const server = http.createServer((req, res) => {
     const reqStart = Date.now();
     const ctx = prepareUpstreamRequest(req, body);
     const { fixed, upstreamHeaders, coercion, parsedReq, isChat, isStream,
-            clientDeclinedUsage, breakdown, promptTokens } = ctx;
+            clientDeclinedUsage, breakdown, promptTokens, cappedAt } = ctx;
 
     // One-line diagnostic binding a failure to this request's assembled size.
     const diag = (label, extra = "") => console.error(
@@ -966,7 +1006,7 @@ const server = http.createServer((req, res) => {
 
           const g = createAttemptGate({ res, proxyRes, proxyReq, plan, attempt, isStream, diag });
           gate = g;
-          const relay = { res, proxyRes, diag, ...g, coercion, parsedReq, promptTokens, reqStart };
+          const relay = { res, proxyRes, diag, ...g, coercion, parsedReq, promptTokens, reqStart, cappedAt };
           if (isStream) relayStreamingChat({ ...relay, clientDeclinedUsage });
           else relayNonStreamingChat(relay);
         }

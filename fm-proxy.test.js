@@ -1001,6 +1001,125 @@ test("a forced tool_choice rejection is typed invalid_request_error through the 
   } finally { await stack.stop(); }
 });
 
+// ── max_tokens, and the truncation mislabel ─────────────────────────────────
+// fm serve SILENTLY IGNORES `max_tokens` — the field almost every OpenAI SDK sends —
+// and truncates only on `max_completion_tokens`. Verified live: max_tokens:10 on a
+// "count to 100" prompt returned 391 completion tokens. Unmapped, a client that asks
+// for a short reply gets an unbounded one.
+test("max_tokens is mapped to max_completion_tokens upstream", async () => {
+  const stack = await startStack();
+  try {
+    await request(stack.proxyPort,
+      { method: "POST", path: "/v1/chat/completions", headers: { "content-type": "application/json" } },
+      JSON.stringify({ model: "system", stream: false, max_tokens: 10, messages: [{ role: "user", content: "hi" }] }));
+    const got = stack.getLastBody();
+    assert.strictEqual(got.max_completion_tokens, 10, "cap must reach fm serve on the field it honours");
+    assert.strictEqual(got.max_tokens, undefined, "the ignored field must not also be forwarded");
+  } finally { await stack.stop(); }
+});
+
+test("an explicit max_completion_tokens is not overridden by max_tokens", async () => {
+  const stack = await startStack();
+  try {
+    await request(stack.proxyPort,
+      { method: "POST", path: "/v1/chat/completions", headers: { "content-type": "application/json" } },
+      JSON.stringify({ model: "system", stream: false, max_tokens: 99, max_completion_tokens: 8, messages: [{ role: "user", content: "hi" }] }));
+    assert.strictEqual(stack.getLastBody().max_completion_tokens, 8);
+  } finally { await stack.stop(); }
+});
+
+// fm serve says finish_reason:"stop" even when it stopped at the cap, so a client cannot
+// tell a complete answer from a truncated one. The cap is approximate (fm serve
+// overshoots), so the check is >= rather than ==.
+test("a completion that reached the cap is re-labelled finish_reason:length", async () => {
+  const stack = await startStack({
+    handler: (req, parsed, res) => {
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify({
+        id: "chatcmpl-x", object: "chat.completion", model: "system",
+        choices: [{ index: 0, message: { role: "assistant", content: "1, 2, 3" }, finish_reason: "stop" }],
+        usage: { prompt_tokens: 20, completion_tokens: 10, total_tokens: 30 },
+      }));
+    },
+  });
+  try {
+    const res = await request(stack.proxyPort,
+      { method: "POST", path: "/v1/chat/completions", headers: { "content-type": "application/json" } },
+      JSON.stringify({ model: "system", stream: false, max_tokens: 10, messages: [{ role: "user", content: "hi" }] }));
+    assert.strictEqual(JSON.parse(res.body).choices[0].finish_reason, "length");
+  } finally { await stack.stop(); }
+});
+
+test("a completion under the cap keeps finish_reason:stop", async () => {
+  const stack = await startStack({
+    handler: (req, parsed, res) => {
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify({
+        id: "chatcmpl-x", object: "chat.completion", model: "system",
+        choices: [{ index: 0, message: { role: "assistant", content: "hi" }, finish_reason: "stop" }],
+        usage: { prompt_tokens: 20, completion_tokens: 2, total_tokens: 22 },
+      }));
+    },
+  });
+  try {
+    const res = await request(stack.proxyPort,
+      { method: "POST", path: "/v1/chat/completions", headers: { "content-type": "application/json" } },
+      JSON.stringify({ model: "system", stream: false, max_tokens: 10, messages: [{ role: "user", content: "hi" }] }));
+    assert.strictEqual(JSON.parse(res.body).choices[0].finish_reason, "stop");
+  } finally { await stack.stop(); }
+});
+
+test("no cap in the request leaves finish_reason untouched", async () => {
+  const stack = await startStack();
+  try {
+    const res = await request(stack.proxyPort,
+      { method: "POST", path: "/v1/chat/completions", headers: { "content-type": "application/json" } },
+      JSON.stringify({ model: "system", stream: false, messages: [{ role: "user", content: "hi" }] }));
+    assert.strictEqual(JSON.parse(res.body).choices[0].finish_reason, "stop");
+  } finally { await stack.stop(); }
+});
+
+// ── the omitted-`stream` default ────────────────────────────────────────────
+// Beta 5 flipped fm serve's default: a chat request that OMITS `stream` comes back as
+// text/event-stream, where the OpenAI spec returns one JSON object. Most SDKs never set
+// the field, so they receive a body they cannot parse. This was previously covered only
+// by the external wire-baseline tool, which meant the suite would not notice the fix
+// being removed — a mutation test confirmed 0 failures when it was reverted.
+test("a request omitting `stream` is pinned to stream:false upstream", async () => {
+  const stack = await startStack();
+  try {
+    await request(stack.proxyPort,
+      { method: "POST", path: "/v1/chat/completions", headers: { "content-type": "application/json" } },
+      JSON.stringify({ model: "system", messages: [{ role: "user", content: "hi" }] }));
+    assert.strictEqual(stack.getLastBody().stream, false);
+  } finally { await stack.stop(); }
+});
+
+test("a request omitting `stream` returns JSON to the client, not SSE", async () => {
+  const stack = await startStack();
+  try {
+    const res = await request(stack.proxyPort,
+      { method: "POST", path: "/v1/chat/completions", headers: { "content-type": "application/json" } },
+      JSON.stringify({ model: "system", messages: [{ role: "user", content: "hi" }] }));
+    assert.match(String(res.headers["content-type"]), /application\/json/);
+    assert.strictEqual(JSON.parse(res.body).object, "chat.completion");
+  } finally { await stack.stop(); }
+});
+
+test("an explicit stream:true is forwarded unchanged, not pinned to false", async () => {
+  // Only the forwarded body is asserted: the response content-type here would come from
+  // the test harness's fake upstream, not from the proxy, so it proves nothing.
+  const stack = await startStack();
+  try {
+    await request(stack.proxyPort,
+      { method: "POST", path: "/v1/chat/completions", headers: { "content-type": "application/json" } },
+      JSON.stringify({ model: "system", stream: true, messages: [{ role: "user", content: "hi" }] }));
+    const got = stack.getLastBody();
+    assert.strictEqual(got.stream, true);
+    assert.strictEqual(got.stream_options.include_usage, true, "streaming still opts into usage");
+  } finally { await stack.stop(); }
+});
+
 test("PCC-unavailable 503 (bare-JSON body, no SSE framing) is typed service_unavailable, not retried as rate-limit", async () => {
   // Reproduces the live failure: fm serve returns HTTP 503 with a BARE-JSON error body
   // (NOT a `data:`-framed SSE frame) when `pcc` lacks attribution. The proxy must
