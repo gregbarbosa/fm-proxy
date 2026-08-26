@@ -319,7 +319,12 @@ generation guide was used` — and `pcc`, which used to be the workaround, is no
 available. A tool without `function.description` still returns 400. `fm serve` still
 ignores `max_tokens`; the proxy's own truncation is still required.
 
-#### Two hazards to act on
+#### Two hazards — both fixed in `57f26d3`
+
+Both were found by this audit and repaired on `fix/beta7-hazards`. The descriptions
+below record what the defect was. Verified live after the fix: a cyclic schema returns
+`400` in about 1 ms and `fm serve` keeps answering, and an unknown model returns
+`invalid_request_error` in about 2 ms.
 
 1. **A recursive `$defs` schema takes the stack down.** The hang needs a definition
    that refers to itself and holds no other required property. `{Node: {child:

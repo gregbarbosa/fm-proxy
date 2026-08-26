@@ -68,13 +68,14 @@ Tested on macOS 27.0 Beta 7 (`26A5421a`), which ships `fm` 2.0.68.1.402.
 > schemas, so tool calling returns without a change here once `fm serve` reads the
 > call again.
 
-> [!WARNING]
-> **A self-referencing `$defs` schema stops `fm serve` until you restart it.**
+> [!NOTE]
+> **A self-referencing `$defs` schema stops `fm serve`. The proxy blocks it for you.**
 >
-> A `$defs` definition that refers to itself and holds no other required property
-> hangs `fm serve`. The request never returns, and every later request hangs too. Only
-> a restart clears it. The proxy cannot repair this shape, because the recursion has no
-> finite inline form. Avoid recursive schemas in `response_format`.
+> A `$defs` definition that refers to itself hangs `fm serve`. The request never
+> returns, every later request hangs too, and only a restart clears it. Recursion has
+> no finite inline form, so the proxy cannot rewrite the schema. It rejects the request
+> instead, with `400` `cyclic_schema` naming the definition, before it opens an upstream
+> connection. Send a recursive schema to `fm serve` directly and you still lose it.
 
 `n > 1` and `parallel_tool_calls` are accepted and then ignored by `fm serve`. Sampling
 parameters pass through unchanged.
@@ -163,13 +164,8 @@ Apple's error messages are generic, so the proxy gives each one a type. A safety
 becomes `finish_reason:"content_filter"` and keeps the partial output. A rate limit
 becomes `rate_limit_exceeded`, and the proxy retries it.
 
-> [!NOTE]
-> **Known defect: the proxy retries an upstream `400`.**
->
-> `fm serve` rejects an unknown model name in 7 ms. The proxy classifies that `400` as
-> retryable, tries it 4 more times, and answers after about 15 seconds with
-> `server_error` / `internal_error` instead of `invalid_request_error`. A client that
-> still asks for `model: "pcc"` meets this on every request.
+An upstream `400` is terminal. The proxy types it `invalid_request_error` and does not
+retry it, so an unknown model name — `pcc`, for example — fails in about 2 ms.
 
 `fm serve` is beta software. Its behaviour changes between builds, so expect to update
 the proxy.
