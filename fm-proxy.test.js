@@ -4,7 +4,7 @@ const assert = require("node:assert");
 const http = require("node:http");
 const { spawn } = require("node:child_process");
 const path = require("node:path");
-const { fixToolSchema, fixTools, fixResponseFormatSchema, expandToolCallArguments, classifyError, errorFrame, fmTokenCount, _isLicenseGate } = require("./fm-proxy.js");
+const { fixToolSchema, fixTools, fixResponseFormatSchema, findCyclicDefs, expandToolCallArguments, classifyError, errorFrame, fmTokenCount, _isLicenseGate } = require("./fm-proxy.js");
 
 // fm serve (Beta 3 / fm 2.0.59) fixed the GenerationSchema `duplicateType` bug that
 // used to force EVERY nested object through a JSON-string round-trip, and Beta 4
@@ -526,6 +526,105 @@ test("an unresolvable $ref falls back rather than dropping the reference", () =>
   assert.ok(out.$defs, "unresolvable ref keeps $defs so the ref still points somewhere");
 });
 
+// ── cyclic $defs detection (Beta 7 hang guard) ─────────────────────────────────
+// A $defs definition that (transitively) reaches itself has no finite inline form,
+// and forwarding it to fm serve HANGS the server permanently — every later request
+// hangs too, until a restart (verified live: `{Node: {child: $ref Node}}` with no
+// other required property; adding a required scalar beside the recursive ref returns
+// 200, but the proxy cannot bet on that undocumented distinction across betas). So
+// the proxy must detect the cycle and reject the request with a client error naming
+// the offending definition, never forward it.
+
+const CYCLIC_SHAPE = {
+  type: "object",
+  properties: { root: { $ref: "#/$defs/Node" } },
+  $defs: { Node: { type: "object", properties: { child: { $ref: "#/$defs/Node" } } } },
+};
+
+test("findCyclicDefs: the wire-baseline 'response_format cyclic' shape is detected, naming Node", () => {
+  assert.strictEqual(findCyclicDefs(CYCLIC_SHAPE), "Node");
+});
+
+test("findCyclicDefs: a direct self-referencing definition is detected", () => {
+  const schema = {
+    type: "object",
+    properties: { a: { $ref: "#/$defs/A" } },
+    $defs: { A: { type: "object", properties: { a: { $ref: "#/$defs/A" } } } },
+  };
+  assert.strictEqual(findCyclicDefs(schema), "A");
+});
+
+test("findCyclicDefs: a transitive cycle (A -> B -> A) is detected and names the definition that reaches itself", () => {
+  const schema = {
+    type: "object",
+    properties: { a: { $ref: "#/$defs/A" } },
+    $defs: {
+      A: { type: "object", properties: { b: { $ref: "#/$defs/B" } } },
+      B: { type: "object", properties: { a: { $ref: "#/$defs/A" } } },
+    },
+  };
+  assert.strictEqual(findCyclicDefs(schema), "A");
+});
+
+test("findCyclicDefs: a cycle hidden inside array items is still detected", () => {
+  const schema = {
+    type: "object",
+    properties: { root: { $ref: "#/$defs/Node" } },
+    $defs: { Node: { type: "object", properties: { kids: { type: "array", items: { $ref: "#/$defs/Node" } } } } },
+  };
+  assert.strictEqual(findCyclicDefs(schema), "Node");
+});
+
+test("findCyclicDefs: acyclic $defs graphs (diamonds, reuse) are not cycles", () => {
+  const schema = {
+    type: "object",
+    properties: { a: { $ref: "#/$defs/A" } },
+    $defs: {
+      A: { type: "object", properties: { b: { $ref: "#/$defs/B" }, c: { $ref: "#/$defs/C" } } },
+      B: { type: "object", properties: { x: { type: "string" } } },
+      C: { type: "object", properties: { b: { $ref: "#/$defs/B" } } },
+    },
+  };
+  assert.strictEqual(findCyclicDefs(schema), null);
+});
+
+test("findCyclicDefs: missing definitions and out-of-document refs are not cycles", () => {
+  assert.strictEqual(findCyclicDefs({ type: "object", $defs: { A: { $ref: "#/$defs/Missing" } } }), null);
+  assert.strictEqual(findCyclicDefs({ type: "object", $defs: { A: { $ref: "https://example.com/schema" } } }), null);
+  assert.strictEqual(findCyclicDefs({ type: "object", properties: { x: { type: "string" } } }), null);
+  assert.strictEqual(findCyclicDefs(null), null);
+  assert.strictEqual(findCyclicDefs({ type: "object", $defs: {} }), null);
+});
+
+test("fixTools flags a cyclic response_format as responseFormatCycle, never inlining it", () => {
+  const { responseFormatCycle } = fixTools(JSON.stringify({
+    model: "system",
+    messages: [{ role: "user", content: "hi" }],
+    response_format: { type: "json_schema", json_schema: { name: "N", schema: CYCLIC_SHAPE } },
+  }));
+  assert.strictEqual(responseFormatCycle, "Node");
+});
+
+test("fixTools leaves a NON-cyclic response_format alone (no false-positive responseFormatCycle)", () => {
+  const { responseFormatCycle } = fixTools(JSON.stringify({
+    model: "system",
+    messages: [{ role: "user", content: "hi" }],
+    response_format: {
+      type: "json_schema",
+      json_schema: {
+        name: "restaurant",
+        schema: {
+          type: "object",
+          properties: { name: { type: "string" }, address: { $ref: "#/$defs/Address" } },
+          required: ["name", "address"],
+          $defs: { Address: { type: "object", properties: { street: { type: "string" } }, required: ["street"] } },
+        },
+      },
+    },
+  }));
+  assert.strictEqual(responseFormatCycle, undefined);
+});
+
 test("a schema with an empty $defs object just loses the empty $defs", () => {
   const out = fixResponseFormatSchema({ type: "object", properties: { name: { type: "string" } }, $defs: {} });
   assert.deepStrictEqual(out, { type: "object", properties: { name: { type: "string" } } });
@@ -775,6 +874,82 @@ test("a plain response_format with $defs/$ref reaches upstream inlined, with no 
   } finally { await stack.stop(); }
 });
 
+test("a cyclic $defs response_format is rejected 400 before reaching upstream (fm serve hang guard)", async () => {
+  // Beta 7: forwarding this exact shape (the wire-baseline 'response_format cyclic'
+  // fixture) hangs fm serve PERMANENTLY — every later request hangs too until a
+  // restart. The proxy must answer 400 itself, naming the offending definition,
+  // and must never open an upstream connection.
+  let upstreamHits = 0;
+  const stack = await startStack({
+    handler: (req, parsed, res) => { upstreamHits++; res.writeHead(200, { "content-type": "application/json" }); res.end("{}"); },
+  });
+  try {
+    const payload = JSON.stringify({
+      model: "system",
+      messages: [{ role: "user", content: "hi" }],
+      response_format: {
+        type: "json_schema",
+        json_schema: {
+          name: "N",
+          schema: {
+            type: "object",
+            properties: { root: { $ref: "#/$defs/Node" } },
+            $defs: { Node: { type: "object", properties: { child: { $ref: "#/$defs/Node" } } } },
+          },
+        },
+      },
+    });
+    const t0 = Date.now();
+    const res = await request(stack.proxyPort,
+      { method: "POST", path: "/v1/chat/completions", headers: { "content-type": "application/json" } },
+      payload);
+    assert.strictEqual(upstreamHits, 0, "the hang-inducing schema must never reach fm serve");
+    assert.strictEqual(res.status, 400, `body=${res.body}`);
+    const obj = JSON.parse(res.body);
+    assert.strictEqual(obj.error.type, "invalid_request_error");
+    assert.strictEqual(obj.error.code, "cyclic_schema");
+    assert.match(obj.error.message, /Node/, "the error names the offending definition");
+    assert.ok(Date.now() - t0 < 2000, "rejection is immediate, no backoff ladder");
+  } finally { await stack.stop(); }
+});
+
+test("a cyclic $defs response_format on a STREAMING request is rejected 400 too", async () => {
+  let upstreamHits = 0;
+  const stack = await startStack({
+    handler: (req, parsed, res) => { upstreamHits++; res.writeHead(200, { "content-type": "application/json" }); res.end("{}"); },
+  });
+  try {
+    const payload = JSON.stringify({
+      model: "system", stream: true,
+      messages: [{ role: "user", content: "hi" }],
+      response_format: { type: "json_schema", json_schema: { name: "N", schema: CYCLIC_SHAPE } },
+    });
+    const res = await request(stack.proxyPort,
+      { method: "POST", path: "/v1/chat/completions", headers: { "content-type": "application/json" } },
+      payload);
+    assert.strictEqual(upstreamHits, 0);
+    assert.strictEqual(res.status, 400, `body=${res.body}`);
+    const obj = JSON.parse(res.body);
+    assert.strictEqual(obj.error.type, "invalid_request_error");
+    assert.strictEqual(obj.error.code, "cyclic_schema");
+  } finally { await stack.stop(); }
+});
+
+test("a cyclic $defs in a TOOL schema is not rejected by the response_format guard", () => {
+  // The hang is specific to response_format's $defs path; tool schemas keep their
+  // existing behaviour (fm serve rejects unsupported tool-schema keywords fast,
+  // which the 400 classification now surfaces terminally).
+  const { responseFormatCycle } = fixTools(JSON.stringify({
+    model: "system",
+    messages: [{ role: "user", content: "hi" }],
+    tools: [{
+      type: "function",
+      function: { name: "tree", description: "Tree", parameters: CYCLIC_SHAPE },
+    }],
+  }));
+  assert.strictEqual(responseFormatCycle, undefined);
+});
+
 // ── Error classification ────────────────────────────────────────────────────
 // The proxy must distinguish fm serve's two mid-stream failure modes so clients can
 // branch: rate-limit (retry) vs safety-guardrail abort (terminal). See fm-proxy.js
@@ -865,6 +1040,49 @@ test("classifyError: plain 'rate limit' phrase also classifies as rate-limit", (
 
 test("classifyError: unknown upstream errors are retryable server_errors", () => {
   const c = classifyError("something else went wrong");
+  assert.strictEqual(c.type, "server_error");
+  assert.strictEqual(c.retry, true);
+});
+
+// ── terminal upstream HTTP 400 (Beta 7 hazard) ────────────────────────────────
+// fm serve rejects a request-shape error (unknown model, malformed body) with HTTP
+// 400 in ~7ms. The message matches no branch, so it used to fall through to the
+// retryable default: the proxy burned the full 1+2+4+8s backoff ladder and then
+// surfaced server_error/internal_error. The 400 is deterministic and permanent —
+// retrying re-sends the identical rejection — so it must be terminal and typed
+// invalid_request_error, following the tool_choice_unsupported precedent.
+
+test("classifyError: an upstream HTTP 400 is terminal invalid_request_error, not a retryable server_error", () => {
+  const c = classifyError("Unknown model 'pcc'. Available models: system.", 400);
+  assert.strictEqual(c.type, "invalid_request_error");
+  assert.strictEqual(c.code, "invalid_request");
+  assert.strictEqual(c.retry, false);
+});
+
+test("classifyError: the same body on HTTP 500 stays a retryable server_error", () => {
+  const c = classifyError("Unknown model 'pcc'. Available models: system.", 500);
+  assert.strictEqual(c.type, "server_error");
+  assert.strictEqual(c.code, "internal_error");
+  assert.strictEqual(c.retry, true);
+});
+
+test("classifyError: HTTP 400 only upgrades the generic fallback — specific branches keep their semantics", () => {
+  // A rate-limit signature must stay a retryable rate limit even on a 400 status.
+  const rl = classifyError("LanguageModelError -1", 400);
+  assert.strictEqual(rl.type, "rate_limit_exceeded");
+  assert.strictEqual(rl.retry, true);
+  // A guardrail abort must stay a content-filter abort even on a 400 status.
+  const gr = classifyError("The model's safety guardrails were triggered.", 400);
+  assert.strictEqual(gr.type, "generation_aborted");
+  assert.strictEqual(gr.retry, false);
+  // A forced-tool_choice rejection must keep its own code.
+  const tc = classifyError("An unsupported generation guide was used.", 400);
+  assert.strictEqual(tc.type, "invalid_request_error");
+  assert.strictEqual(tc.code, "tool_choice_unsupported");
+});
+
+test("classifyError: no status (backward compatible) still defaults to retryable server_error", () => {
+  const c = classifyError("Unknown model 'pcc'. Available models: system.");
   assert.strictEqual(c.type, "server_error");
   assert.strictEqual(c.retry, true);
 });
@@ -998,6 +1216,59 @@ test("a forced tool_choice rejection is typed invalid_request_error through the 
     assert.ok(res.body.includes('"type":"invalid_request_error"'), `body=${res.body}`);
     assert.ok(!/"type":"rate_limit_exceeded"/.test(res.body), `body=${res.body}`);
     assert.strictEqual(requestCount, 1, "must not retry a permanent client-request-shape bug");
+  } finally { await stack.stop(); }
+});
+
+test("an upstream HTTP 400 (unknown model) is surfaced as invalid_request_error without retrying", async () => {
+  // Reproduces the live Beta 7 failure: fm serve rejects an unknown model in ~7ms
+  // with HTTP 400 + {error:{type:'invalid_request_error',code:'400'}}. The proxy
+  // used to run the full 1+2+4+8s backoff ladder and then answer
+  // server_error/internal_error. It must surface the 400 as a terminal
+  // invalid_request_error instead.
+  let requestCount = 0;
+  const stack = await startStack({
+    handler: (req, parsed, res) => {
+      requestCount++;
+      res.writeHead(400, { "content-type": "application/json" });
+      res.end(JSON.stringify({
+        error: { type: "invalid_request_error", code: "400", message: "Unknown model 'pcc'. Available models: system." },
+      }));
+    },
+  });
+  try {
+    const payload = JSON.stringify({ model: "pcc", stream: false, messages: [{ role: "user", content: "hi" }] });
+    const t0 = Date.now();
+    const res = await request(stack.proxyPort,
+      { method: "POST", path: "/v1/chat/completions", headers: { "content-type": "application/json" } },
+      payload);
+    assert.strictEqual(res.status, 400, `status=${res.status} body=${res.body}`);
+    const obj = JSON.parse(res.body);
+    assert.strictEqual(obj.error.type, "invalid_request_error", `body=${res.body}`);
+    assert.strictEqual(obj.error.message, "Unknown model 'pcc'. Available models: system.");
+    assert.strictEqual(requestCount, 1, "must not retry a permanent client-shape rejection");
+    assert.ok(Date.now() - t0 < 2000, `must not burn the backoff ladder, took ${Date.now() - t0}ms`);
+  } finally { await stack.stop(); }
+});
+
+test("an upstream 400 on a STREAMING request is also terminal invalid_request_error", async () => {
+  // The same rejection on a stream:true request arrives as bare JSON over a 400
+  // response, not an SSE frame — the streaming relay must classify it identically.
+  const stack = await startStack({
+    handler: (req, parsed, res) => {
+      res.writeHead(400, { "content-type": "application/json" });
+      res.end(JSON.stringify({
+        error: { type: "invalid_request_error", code: "400", message: "Unknown model 'pcc'. Available models: system." },
+      }));
+    },
+  });
+  try {
+    const payload = JSON.stringify({ model: "pcc", stream: true, messages: [{ role: "user", content: "hi" }] });
+    const res = await request(stack.proxyPort,
+      { method: "POST", path: "/v1/chat/completions", headers: { "content-type": "application/json" } },
+      payload);
+    assert.ok(res.body.includes('"type":"invalid_request_error"'), `body=${res.body}`);
+    assert.ok(!/"type":"server_error"/.test(res.body), `body=${res.body}`);
+    assert.ok(!/likely PCC rate limit/.test(res.body), `body=${res.body}`);
   } finally { await stack.stop(); }
 });
 
