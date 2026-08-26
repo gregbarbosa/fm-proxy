@@ -20,7 +20,6 @@ Generate a response to a prompt.
 ```
 MODEL OPTIONS:
   --model system     - On-device Apple Foundation Model (default)
-  --model pcc        - Apple Foundation Model on Private Cloud Compute
 ```
 
 
@@ -28,7 +27,7 @@ MODEL OPTIONS:
 |---|---|
 | `--stream, --no-stream` | Stream the output as it's generated _(default: `--stream`)_ |
 | `--greedy, -g` | Use greedy sampling |
-| `--model, -m <model>` | Model to use: system or pcc _(default: `system`)_ |
+| `--model, -m <model>` | Model to use: system _(default: `system`)_ |
 | `--use-case <use-case>` | Use case for the language model |
 | `--guardrails <guardrails>` | Guardrail level for the language model |
 | `--verbose, -v` | Print verbose output |
@@ -55,7 +54,7 @@ Start an interactive multi-turn conversation. Sessions are automatically saved t
 
 | Option | Description |
 |---|---|
-| `--model, -m <model>` | Model to use: system or pcc _(default: `system`)_ |
+| `--model, -m <model>` | Model to use: system _(default: `system`)_ |
 | `--use-case <use-case>` | Use case for the language model |
 | `--guardrails <guardrails>` | Guardrail level for the language model |
 | `--resume, -r <resume>` | Resume a saved chat session |
@@ -140,7 +139,7 @@ Start a Chat Completions API server for Foundation Models.
 
 
 ```
-Starts an HTTP server that exposes the Chat Completions API. Any client that supports the Chat Completions API can connect to it. Specify the model per request via the "model" field: "system" (default) or "pcc".
+Starts an HTTP server that exposes the Chat Completions API. Any client that supports the Chat Completions API can connect to it. The per-request "model" field is optional: "system" is the default and the only supported value.
 
 Use --socket for Unix domain socket transport (recommended for local Python bindings). Use --host/--port for TCP (default).
 
@@ -170,24 +169,9 @@ Check whether the specified model is available. If no model is specified, all mo
 
 | Option | Description |
 |---|---|
-| `--model, -m <model>` | Model to check: system or pcc (default: all) |
+| `--model, -m <model>` | Model to check: system (default: all) |
 | `--use-case <use-case>` | Use case for the language model |
 | `--guardrails <guardrails>` | Guardrail level for the language model |
-| `-h, --help` | Show help information. |
-
-## `fm quota-usage`
-
-Check model quota usage.
-
-
-```
-Fetches the current quota usage for the specified model. If no model is specified, all models are checked. Quota applies only to the Private Cloud Compute model; the on-device system model reports as not applicable.
-```
-
-
-| Option | Description |
-|---|---|
-| `--model, -m <model>` | Model to check: system or pcc (default: all) |
 | `-h, --help` | Show help information. |
 
 ## `fm license`
