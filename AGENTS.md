@@ -32,13 +32,13 @@ version is on disk, so regenerate rather than hand-editing.
 `fm --version` does **not** exist (errors "Unknown option"). To detect when Apple ships a
 new `fm`/FoundationModels build across macOS betas, fingerprint the binary:
 
-| What | How | Beta 2 value | Beta 3 value | Beta 4 value | Beta 5 value | Beta 6 value |
-|---|---|---|---|---|---|---|
-| fm source version | `otool -l /usr/bin/fm \| grep -A2 LC_SOURCE_VERSION` | `2.0.55.1.402` | `2.0.59` | `2.0.62.1.402` | `2.0.68.1.401` | `2.0.68.1.401` |
-| Framework version | `plutil -p /System/Library/Frameworks/FoundationModels.framework/Resources/Info.plist \| grep CFBundleVersion` | `2.0.55.1.402` | `2.0.59` | `2.0.62.1.402` | `2.0.68.1.401` | `2.0.68.1.401` |
-| Runtime version | `codesign -dvvv /usr/bin/fm` → `Runtime Version=` | `27.0.0` | `27.0.0` | `27.0.0` | `27.0.0` | `27.0.0` |
-| Rebuild date | `ls -la /usr/bin/fm` (mtime) | Jun 19 2026 | Jul 3 2026 | Jul 17 2026 | Aug 7 2026 | Aug 14 2026 |
-| macOS build | `sw_vers` → `BuildVersion` | `26A5368g` (27.0 Beta 2) | `26A5378j` (27.0 Beta 3) | `26A5388g` (27.0 Beta 4) | `26A5406e` (27.0 Beta 5) | `26A5416b` (27.0 Beta 6) |
+| What | How | Beta 2 value | Beta 3 value | Beta 4 value | Beta 5 value | Beta 6 value | Beta 7 value |
+|---|---|---|---|---|---|---|---|
+| fm source version | `otool -l /usr/bin/fm \| grep -A2 LC_SOURCE_VERSION` | `2.0.55.1.402` | `2.0.59` | `2.0.62.1.402` | `2.0.68.1.401` | `2.0.68.1.401` | `2.0.68.1.402` |
+| Framework version | `plutil -p /System/Library/Frameworks/FoundationModels.framework/Resources/Info.plist \| grep CFBundleVersion` | `2.0.55.1.402` | `2.0.59` | `2.0.62.1.402` | `2.0.68.1.401` | `2.0.68.1.401` | `2.0.68.1.402` |
+| Runtime version | `codesign -dvvv /usr/bin/fm` → `Runtime Version=` | `27.0.0` | `27.0.0` | `27.0.0` | `27.0.0` | `27.0.0` | `27.0.0` |
+| Rebuild date | `ls -la /usr/bin/fm` (mtime) | Jun 19 2026 | Jul 3 2026 | Jul 17 2026 | Aug 7 2026 | Aug 14 2026 | Aug 21 2026 |
+| macOS build | `sw_vers` → `BuildVersion` | `26A5368g` (27.0 Beta 2) | `26A5378j` (27.0 Beta 3) | `26A5388g` (27.0 Beta 4) | `26A5406e` (27.0 Beta 5) | `26A5416b` (27.0 Beta 6) | `26A5421a` (27.0 Beta 7) |
 
 Audit recipe after any OS update:
 1. **Structure** — `python3 tools/gen-fm-docs.py --outdir /tmp/fmnew` then
@@ -265,6 +265,92 @@ The proxy is a drop-in OpenAI endpoint — point any OpenAI client at it and go:
     models or use `tool_choice:"auto"`/omit it to work around this on `system`.
   - `type: "server_error"` (`code: "internal_error"` / `"upstream_unreachable"`) —
     anything else, including the `502` when `fm serve` is down.
+
+### Beta 7 (fm 2.0.68.1.402, build 26A5421a) — PCC removed
+
+Audited 2026-08-26 against a live `fm serve` on `system`. This is the first `fm` change
+since Beta 4: the source version moves `2.0.68.1.401` → `2.0.68.1.402`.
+
+**Private Cloud Compute is gone.** The CLI reference diff shows only deletions:
+
+- `--model pcc` is removed from `respond`, `chat`, and `available`. The parser answers
+  `The value 'pcc' is invalid for '-m <model>'. Please provide one of 'system'.`
+- The `fm quota-usage` subcommand is deleted. It existed only to report PCC quota.
+- `fm serve` help now reads `"system" is the default and the only supported value`.
+- `fm available` prints `System model available` and nothing else.
+- `GET /health` and `GET /v1/models` list only `system`.
+- `POST /v1/chat/completions` with `model:"pcc"` returns `400 Unknown model 'pcc'.
+  Available models: system`.
+
+The `pcc` model enum is absent from the binary's ArgumentParser tree, so this is a
+compile-time removal, not account state, entitlement, or licence state. Every PCC note
+in this file — the context ceiling, the rate-limit error, the codegen abort, the
+Terminal.app attribution rule, the `503` service-unavailable branch — is now dead
+surface on Beta 7. The notes stay for the history; do not act on them.
+
+The licence acceptance survives the OS update. `sudo fm license` is not needed again.
+
+#### What else changed
+
+| Check | Beta 5 / 6 | Beta 7 |
+|---|---|---|
+| `$defs` + dialect, non-cyclic | Hangs, poisons the server | **Fixed.** 200 in ~1–3 s |
+| `$defs` + dialect, **cyclic** | Hangs, poisons the server | Still hangs, still poisons |
+| Tool-call output | `tool_calls` null, control tokens leak into content | `tool_calls` still null, but content is **clean JSON**, no leaked tokens |
+| `array<array<object>>` tool param | Hard 400 | **Accepted.** Raw `fm serve` returns 200 |
+
+The `$defs` fix has a rule attached. A `title` on a string property now makes it a
+*named string type*, which then requires a non-empty `enum`:
+
+```
+DecodingError.dataCorrupted ... Path: $defs.properties.name.enum.
+Named string types must have a non-empty enum
+```
+
+So apply the dialect to objects only, or give the titled string an `enum`. Both forms
+return 200. A bare `$defs` with no dialect still fails fast on `x-order`, unchanged.
+
+#### What did not change
+
+Prompt framing is still 57 tokens for `hello world`, so `CONVERSATION_FRAMING = 54`
+still holds against a bare `fm count-tokens` count of 3. An omitted `stream` still
+returns `text/event-stream`. A forced `tool_choice` still returns `500 An unsupported
+generation guide was used` — and `pcc`, which used to be the workaround, is no longer
+available. A tool without `function.description` still returns 400. `fm serve` still
+ignores `max_tokens`; the proxy's own truncation is still required.
+
+#### Two hazards — both fixed in `57f26d3`
+
+Both were found by this audit and repaired on `fix/beta7-hazards`. The descriptions
+below record what the defect was. Verified live after the fix: a cyclic schema returns
+`400` in about 1 ms and `fm serve` keeps answering, and an unknown model returns
+`invalid_request_error` in about 2 ms.
+
+1. **A recursive `$defs` schema takes the stack down.** The hang needs a definition
+   that refers to itself and holds no other required property. `{Node: {child:
+   $ref Node}}` hangs; adding a required scalar beside `child` returns 200. A dialect on
+   the *root* schema also triggers it. The proxy keeps `$defs` for cyclic schemas by
+   design, because recursion has no finite inline form, so an ordinary client request
+   reaches this: verified end-to-end through port 1977, and `fm serve` then answered
+   nothing until restart. The wire-baseline fixture `response_format cyclic` is exactly
+   this shape.
+
+2. **The proxy retries an upstream `400`.** `fm serve` rejects an unknown model in 7 ms.
+   `classifyError` does not treat that `400` as terminal, so the proxy runs the full
+   1+2+4+8 s backoff and answers after ~15 s with `server_error` / `internal_error`
+   rather than `invalid_request_error`. This is the same defect class the forced
+   `tool_choice` branch already fixes, and PCC's removal makes it reachable for anyone
+   whose client still names `model: "pcc"`.
+
+#### Test results
+
+All 82 unit tests pass. The wire baseline is unchanged. `tools/harness-check.sh` reports
+6 passed, 0 failed. Vision works: a 256 px PNG cost 128 prompt tokens and the model
+described it correctly.
+
+`pi` on `system` still cannot fit the 4096-token window, and the documented workaround
+was "use `pcc`". With `pcc` removed there is no longer any way to run `pi` against
+`fm serve`.
 
 ### Beta 6 (26A5416b) — no Foundation Models change
 
