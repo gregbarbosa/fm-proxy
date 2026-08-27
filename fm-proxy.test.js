@@ -645,7 +645,7 @@ function request(port, opts, payload) {
 // Start a mock fm serve + the real proxy. `upstreamPort = 0` means "point the
 // proxy at a dead port" so its socket error path (502) fires. `handler` receives
 // (mockReq, parsedBody, mockRes) for tests that need to inspect what arrived.
-async function startStack({ handler, deadUpstream = false } = {}) {
+async function startStack({ handler, deadUpstream = false, maxRetries = 0 } = {}) {
   const proxyPort = await freePort();
   let upstream = null;
   let lastBody = null;
@@ -675,7 +675,7 @@ async function startStack({ handler, deadUpstream = false } = {}) {
 
   const child = spawn(process.execPath, [path.join(__dirname, "fm-proxy.js")], {
     env: { ...process.env, FM_PORT: String(upstreamPort), PROXY_PORT: String(proxyPort),
-           FM_MAX_RETRIES: "0", GAUGE_MODE: "msgs" },
+           FM_MAX_RETRIES: String(maxRetries), FM_RETRY_BASE_MS: "10", GAUGE_MODE: "msgs" },
     stdio: ["ignore", "pipe", "pipe"],
   });
   let stderr = "";
@@ -1619,5 +1619,66 @@ test("a browser-shaped request still returns CORS headers to the client", async 
       JSON.stringify({ model: "system", stream: false, messages: [{ role: "user", content: "hi" }] }));
     assert.strictEqual(res.status, 200, `body=${res.body}`);
     assert.strictEqual(res.headers["access-control-allow-origin"], "*");
+  } finally { await stack.stop(); }
+});
+
+// ── Context overflow is terminal ─────────────────────────────────────────────
+// A prompt larger than the model's window fails identically every time: the request is
+// fixed, so a retry re-sends the same oversized transcript. The on-device window is
+// 4096 tokens and agent harnesses overshoot it easily (pi's own framing assembles to
+// ~8.4k before a single tool), so this is the failure a client meets most often.
+// It used to fall through to the retryable generic branch and cost the full
+// 1+2+4+8s ladder — five upstream attempts — before surfacing.
+test("classifyError: a context overflow is terminal, not a retryable server_error", () => {
+  const c = classifyError("The session's transcript exceeded the model's context size.");
+  assert.strictEqual(c.type, "invalid_request_error");
+  assert.strictEqual(c.code, "context_length_exceeded");
+  assert.strictEqual(c.retry, false);
+});
+
+test("classifyError: context overflow stays terminal on a 500 (fm serve types it server_error)", () => {
+  const c = classifyError("The session's transcript exceeded the model's context size.", 500);
+  assert.strictEqual(c.code, "context_length_exceeded");
+  assert.strictEqual(c.retry, false);
+});
+
+test("a context overflow hits upstream exactly once, even with retries enabled", async () => {
+  let hits = 0;
+  const stack = await startStack({
+    maxRetries: 4,
+    handler: (req, parsed, res) => {
+      hits++;
+      res.writeHead(200, { "content-type": "text/event-stream" });
+      res.write('data: {"error":{"type":"server_error","code":"500","message":"The session\'s transcript exceeded the model\'s context size."}}\n\n');
+      res.end();
+    },
+  });
+  try {
+    const res = await request(stack.proxyPort,
+      { method: "POST", path: "/v1/chat/completions", headers: { "content-type": "application/json" } },
+      JSON.stringify({ model: "system", stream: true, messages: [{ role: "user", content: "hi" }] }));
+    assert.strictEqual(hits, 1, `retried a permanent overflow ${hits} times`);
+    assert.ok(res.body.includes('"context_length_exceeded"'), `body=${res.body}`);
+  } finally { await stack.stop(); }
+});
+
+test("non-streaming context overflow is typed and not retried", async () => {
+  let hits = 0;
+  const stack = await startStack({
+    maxRetries: 4,
+    handler: (req, parsed, res) => {
+      hits++;
+      res.writeHead(500, { "content-type": "application/json" });
+      res.end(JSON.stringify({
+        error: { type: "server_error", code: "500", message: "The session's transcript exceeded the model's context size." },
+      }));
+    },
+  });
+  try {
+    const res = await request(stack.proxyPort,
+      { method: "POST", path: "/v1/chat/completions", headers: { "content-type": "application/json" } },
+      JSON.stringify({ model: "system", stream: false, messages: [{ role: "user", content: "hi" }] }));
+    assert.strictEqual(hits, 1, `retried a permanent overflow ${hits} times`);
+    assert.ok(res.body.includes('"context_length_exceeded"'), `body=${res.body}`);
   } finally { await stack.stop(); }
 });

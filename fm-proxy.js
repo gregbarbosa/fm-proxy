@@ -470,6 +470,15 @@ function classifyError(msg, status) {
   if (m.includes("unsupported generation guide"))
     return { type: "invalid_request_error", code: "tool_choice_unsupported", retry: false,
              label: "UNSUPPORTED GENERATION GUIDE (forced tool_choice)" };
+  // The prompt is larger than the model's window. fm serve reports it as a 500, but it
+  // is a client-shape problem: the request is fixed, so every retry re-sends the same
+  // oversized transcript and re-fails identically. Terminal, and typed the way OpenAI
+  // types it (`invalid_request_error` / `context_length_exceeded`) so clients can branch
+  // on it and trim. The on-device window is 4096 tokens, which agent harnesses overshoot
+  // easily, so this is a common failure — it must not cost the full backoff ladder.
+  if (m.includes("exceeded the model's context size") || m.includes("exceeds the maximum allowed context"))
+    return { type: "invalid_request_error", code: "context_length_exceeded", retry: false,
+             label: "CONTEXT EXCEEDED" };
   // A genuine rate limit. Do NOT reclassify this on the request's shape: forced
   // tool_choice has its own message (handled above), so any extra reclassification here
   // would only mislabel a real rate limit as a permanent client error and skip the
@@ -715,10 +724,6 @@ function relayStreamingChat({ res, proxyRes, diag, commit, isCommitted, fail, is
       const line = idx !== -1 ? pending.slice(0, idx + 1) : pending;
       pending = idx !== -1 ? pending.slice(idx + 1) : "";
       const t = line.trim();
-      // Context overflow is deterministic — never retry it, just surface.
-      if (t.toLowerCase().includes("exceeded the model's context size")) {
-        diag("CONTEXT EXCEEDED", `— line: ${t}`);
-      }
       let obj = null, isErr = false, errCls = null, meaningful = false;
       if (t.startsWith("data:")) {
         const payload = t.slice(5).trim();
@@ -750,7 +755,7 @@ function relayStreamingChat({ res, proxyRes, diag, commit, isCommitted, fail, is
             }
           }
         } catch { /* keepalive / non-JSON */ }
-      } else if (/languagemodelerror|error -1/i.test(t)) {
+      } else if (/languagemodelerror|error -1|exceeded the model's context size/i.test(t)) {
         isErr = true; // raw (non-data) error line
         errCls = classifyError(t);
       } else if (t.startsWith("{")) {

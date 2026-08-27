@@ -79,8 +79,10 @@ left to mislead:
 - **PCC is removed from `fm`.** The 32k window it provided no longer exists.
 - **Tool calling is broken upstream.** `fm serve` does not turn the model's tool call
   into a `tool_calls` field, so no client gets one.
-- **Pi does not fit the on-device window.** Its built-in tools frame to ~11k against a
-  4096-token limit, and `-nt` with a one-line system prompt still overflows.
+- **Pi does not fit the on-device window.** `pi-minimal` assembles to 9508 tokens
+  against a 4096-token limit, and `-nt` with a one-line `--system-prompt` still floors at
+  8397. The cause is Pi's own message content, not its tools — a lean toolset is only
+  499 of those tokens, so trimming tools cannot rescue it.
 
 A thin OpenAI client against the `system` model works well; see the next section. Treat
 Pi and comparable agent harnesses as unsupported on Beta 7.
@@ -124,6 +126,11 @@ The proxy is a drop-in OpenAI endpoint — point any OpenAI client at it and go:
   - `type: "invalid_request_error"` (`code: "invalid_request"`) — any upstream HTTP 400,
     such as an unknown model name or `n > 1`. Terminal: fm serve rejects it in ~7 ms and
     a retry re-sends the same rejection, so the proxy surfaces it immediately.
+  - `type: "invalid_request_error"` (`code: "context_length_exceeded"`) — the prompt is
+    larger than the 4096-token window (`"The session's transcript exceeded the model's
+    context size."`). fm serve reports it as a 500, but the request is fixed, so every
+    retry re-sends the same oversized transcript. Terminal: trim the prompt. The HTTP
+    status stays fm serve's 500 — branch on `type`, as with `tool_choice_unsupported`.
   - `type: "invalid_request_error"` (`code: "cyclic_schema"`) — a `response_format`
     schema whose `$defs` refer to themselves. Rejected by the proxy before any upstream
     connection, because forwarding one hangs `fm serve` permanently.
@@ -276,9 +283,16 @@ tokens. Through the raw API that is easy — a plain turn frames to 57 tokens, a
 1024px travel-poster test image to 195. Through Pi it is not: Pi's built-in tools alone
 frame to ~11k (`Content contains 11176 tokens, which exceeds the maximum allowed
 context size of 4096`), and even `-nt` with a one-line `--system-prompt` still
-overflows. Beta 5 and Beta 6 could fall back to `pcc` and its 32k window; Beta 7 cannot,
-because `pcc` is gone. So an agent client like Pi has no route to `fm serve` at all —
-a thin client is the only workable shape.
+overflows. Measured on Beta 7 through the proxy: `pi-minimal` (`pi -ne -ns -np`)
+assembles to **9508** tokens, of which the toolset is only 499 — the other 9009 are Pi's
+own message content. With `-nt` and a one-line `--system-prompt` the floor is still
+**8397**, over twice the window. So the blocker is Pi's system prompt, not its tools,
+and trimming tools cannot rescue it. Beta 5 and Beta 6 could fall back to `pcc` and its
+32k window; Beta 7 cannot, because `pcc` is gone. An agent client like Pi therefore has
+no route to `fm serve` at all — a thin client is the only workable shape.
+
+Pi's own gauge reads `0.2%/4.1k` for a request that really assembles to 9508, because it
+counts only `messages[].content`. Do not trust it; read the proxy's `[assembled]` line.
 
 Passing an image to Pi uses `@path`: `pi ... @/tmp/poster.png "What does this say?"`
 (its own help shows `pi @prompt.md @image.png "What color is the sky?"`). Note `@path`
@@ -401,6 +415,7 @@ because fm serve also frames three things into the prompt:
 ```
 
 and flags the failing request (`*** CONTEXT EXCEEDED ***`, `*** UPSTREAM STREAM ABORTED ***`).
+An overflow is terminal and is surfaced on the first attempt — it is not retried.
 Note: `tools=` *under*-counts fm serve's true per-tool framing (it counts raw JSON; fm
 adds scaffolding), so with a fat toolset the real prompt is bigger than `assembled`
 shows. This under-count only affects the **streaming** gauge — non-streaming gets fm
