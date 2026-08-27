@@ -3,17 +3,12 @@
 #
 #   Apple `fm serve` (the entitled engine)  +  fm-proxy.js (OpenAI-compat shim)
 #
-# fm serve runs in the FOREGROUND (this script blocks on it). That is load-bearing:
-# macOS PCC attribution only sticks to a foreground, TTY-attached `fm serve`.
-# Backgrounding it (the old node launcher, or a shell `&`) makes every `pcc` request
-# fail with ModelManagerError 1013 / "not available in this context" (HTTP 503) even
-# though `system` works. Foreground `fm serve` keeps PCC (verified). The exact macOS
-# mechanism is unknown, but the foreground/background distinction is empirically
-# decisive. See docs + memory `launcher-breaks-pcc-attribution`.
+# fm serve runs in the FOREGROUND (this script blocks on it) so Ctrl-C reaches it
+# directly. Beta 7 removed Private Cloud Compute, so the old Terminal.app foreground
+# requirement is gone: the `system` model works in any terminal, backgrounded or not.
 #
-# The proxy is a backgrounded child — it only forwards, it doesn't need PCC. Traps on
-# INT/TERM/HUP/EXIT tear it down so it can't orphan (Ctrl-C, closed terminal, or fm
-# serve dying all clean up the proxy).
+# The proxy is a backgrounded child. Traps on INT/TERM/HUP/EXIT tear it down so it
+# can't orphan (Ctrl-C, closed terminal, or fm serve dying all clean up the proxy).
 #
 #   ./fm-launch.sh             # quiet: startup + proxy errors/warnings only
 #   ./fm-launch.sh --verbose   # also shows the proxy's per-request [assembled] telemetry
@@ -55,7 +50,7 @@ Usage: ./fm-launch.sh [options]
   --health-timeout <ms>  how long to wait for fm serve (default 20000)
   -h, --help
 
-fm serve runs in the foreground (required for PCC attribution). Ctrl-C to stop.
+fm serve runs in the foreground. Ctrl-C to stop.
 
 OpenAI base URL once up: http://127.0.0.1:<proxy-port>/v1  (any dummy API key)
 EOF
@@ -137,7 +132,7 @@ cleanup() {
 }
 trap cleanup INT TERM HUP EXIT
 
-# 1) the proxy — backgrounded. It doesn't need PCC; it only forwards to fm serve.
+# 1) the proxy — backgrounded; it only forwards to fm serve.
 say "starting proxy on :$PROXY_PORT  → forwarding to :$FM_PORT"
 node "$SCRIPT_DIR/fm-proxy.js" > >(tag_stream) 2>&1 &
 PROXY_PID=$!
@@ -146,11 +141,11 @@ if ! wait_listening "$PROXY_PORT" 10000; then
   exit 1
 fi
 
-# 2) fm serve — FOREGROUND (blocks here). Backgrounding it loses PCC attribution.
+# 2) fm serve — FOREGROUND (blocks here).
 # Run it exactly like the working manual setup: raw to the terminal, no &, no pipe.
 # A backgrounded health-checker prints "stack up" once fm serve answers, since the
 # foreground command blocks this main flow.
-say "starting fm serve on :$FM_PORT  (FOREGROUND — required for PCC attribution)"
+say "starting fm serve on :$FM_PORT  (FOREGROUND)"
 (
   if wait_health "$FM_PORT" "$HEALTH_TIMEOUT_MS"; then
     say "fm serve is healthy ✓"
@@ -158,11 +153,11 @@ say "starting fm serve on :$FM_PORT  (FOREGROUND — required for PCC attributio
     [[ "$VERBOSE" == false ]] && \
       say "running in quiet mode; pass --verbose for per-request telemetry. Errors are always shown."
   else
-    sayerr "fm serve did not become healthy on :$FM_PORT. Are you signed into Apple Intelligence in this Terminal? (PCC needs the attribution.)"
+    sayerr "fm serve did not become healthy on :$FM_PORT. Is Apple Intelligence enabled, and the CLI licence accepted (sudo fm license)?"
   fi
 ) &
 
-"$FM_BIN" serve --port "$FM_PORT"          # FOREGROUND — blocks; PCC attribution lives here
+"$FM_BIN" serve --port "$FM_PORT"          # FOREGROUND — blocks here
 fm_rc=$?
 # fm serve exited (Ctrl-C / crash). EXIT trap reaps the proxy.
 exit "$fm_rc"
