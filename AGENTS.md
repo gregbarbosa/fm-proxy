@@ -43,49 +43,64 @@ new `fm`/FoundationModels build across macOS betas, fingerprint the binary:
 | macOS build | `sw_vers` → `BuildVersion` | `26A5368g` (27.0 Beta 2) | `26A5378j` (27.0 Beta 3) | `26A5388g` (27.0 Beta 4) | `26A5406e` (27.0 Beta 5) | `26A5416b` (27.0 Beta 6) | `26A5421a` (27.0 Beta 7) |
 
 Audit recipe after any OS update:
-1. **Structure** — `python3 tools/gen-fm-docs.py --outdir /tmp/fmnew` then
-   `diff docs/fm-reference.md /tmp/fmnew/fm-reference.md`. (Beta 2: byte-identical to Beta 1.
-   Beta 3: **changed** — "JSON schema" wording → "structured output schema" throughout, and
-   `fm schema object --help`'s USAGE examples now show a `--nested <name>` flag. That flag
-   does **not** actually exist (`Unknown argument: --nested`); the OPTIONS list still
-   documents the real, working flag `--object <name>`. Treat this as a bug in Apple's help
-   text, not a rename — keep using `--object`.)
-2. **Behavior** — the help tree can stay identical while behavior changes (or vice versa,
-   per Beta 3), so re-test the known walls separately:
-   - nested-schema `duplicateType` — **FIXED in Beta 3**, for both `response_format`
-     (verified via `fm respond --schema` and `response_format` json_schema over
-     `/v1/chat/completions`, using a real `$defs`/`$ref` nested schema) and **tool
-     parameters** (verified directly: nested object, array<object>, object-in-object,
-     object → array → object all decode correctly through `tools`/`tool_calls`). Was
-     broken Beta 1–2. Two shapes remain broken on the tool-parameter path even in
-     Beta 3 — see "Nested params" below.
-   - `response_format` `required`-array / `title`+`x-order` dialect — still enforced, but
-     narrower than originally thought: only for object schemas reached through `$defs`,
-     not "every object level" (flat and inline-nested schemas need none of it — see
-     "Structured output" below). `fm-proxy.js` now injects the dialect into `$defs`
-     automatically. Tool parameters, by contrast, need **no** title/x-order dialect at all.
-   - non-streaming `usage.prompt_tokens` — **FIXED in Beta 3.** Verified live against
-     `fm token-count`: values now match exactly (was hardcoded `0`). Streaming still
-     sends no `usage` at all — unchanged, still needs the proxy's fill-in.
-   - on-device `system` model actually running inference — healthy again in Beta 3 (Beta 2
-     was flaky right after update — see Known limits).
 
-## Tool calling with Pi — withdrawn
+1. **Structure** — regenerate and diff the CLI tree:
+   `python3 tools/gen-fm-docs.py --outdir /tmp/fmnew` then
+   `diff docs/fm-reference.md /tmp/fmnew/fm-reference.md`.
+   The tree is a compile-time dump, so a diff here is authoritative: Beta 7's was all
+   deletions, which is how PCC's removal was caught.
+2. **Behaviour** — the help tree can stay identical while behaviour changes, and the
+   reverse also happens, so re-test the known walls separately. Run the three test
+   layers in `tools/TEST_PLAN.md`, then re-check by hand:
+   - tool calling — still broken upstream (`tool_calls` never populated)
+   - `$defs` in `response_format` — undecorated 400s; a **cyclic** one hangs `fm serve`
+     permanently, so test it last and restart the server afterwards
+   - forced `tool_choice` — 500 "unsupported generation guide"
+   - a tool with no `function.description` — 400s the whole request
+   - omitted `stream` — returns SSE, not JSON
+   - `n > 1` — 400s
+   - prompt framing — `hello world` should be 57 `prompt_tokens`
+   - the 4096-token window — a ~4056-token prompt passes, ~8056 does not
 
-This section used to describe running Pi against `fm serve` for tool calling and PCC's
-32k context. Beta 7 removes both reasons to do it, so the runbook is gone rather than
-left to mislead:
+Record the result as a new `### Beta N` section, and fold the previous one into the
+release-history table.
 
-- **PCC is removed from `fm`.** The 32k window it provided no longer exists.
+## Running Pi against fm-proxy
+
+Pi **works** against the on-device model. What it cannot do is tool calling, and what
+kills it in practice is project context, not the harness itself.
+
+Use `pi-minimal` (an alias for `pi -ne -ns -np --no-themes`) and select the `` FM``
+provider's `system` model. Measured live on Beta 7, in a directory with no context file:
+
+```
+[assembled] req model=system turns=1 gauge(msgs)=689 tools=499 => assembled=1188
+```
+
+1188 tokens of a 4096-token window, and the request returns HTTP 200. The lean toolset
+costs only 499 tokens.
+
+**The window is spent on project context, not on Pi.** Running the identical command in
+a directory holding this repo's `AGENTS.md` assembles to **9582** tokens and fails:
+
+| Directory | messages | tools | assembled | Result |
+|---|---|---|---|---|
+| empty | 689 | 499 | 1188 | HTTP 200 |
+| plus `AGENTS.md` | 9083 | 499 | 9582 | context exceeded |
+
+One 40 KB context file is ~8.4k tokens — twice the whole window. So on the on-device
+model, treat the 4096 tokens as a budget for *your documents*, and keep Pi out of
+directories with large `AGENTS.md`/`CLAUDE.md` files. Earlier betas could fall back to
+`pcc` and its 32k window; Beta 7 cannot, because `pcc` is gone.
+
+Two limits remain regardless of context size:
+
 - **Tool calling is broken upstream.** `fm serve` does not turn the model's tool call
-  into a `tool_calls` field, so no client gets one.
-- **Pi does not fit the on-device window.** `pi-minimal` assembles to 9508 tokens
-  against a 4096-token limit, and `-nt` with a one-line `--system-prompt` still floors at
-  8397. The cause is Pi's own message content, not its tools — a lean toolset is only
-  499 of those tokens, so trimming tools cannot rescue it.
+  into a `tool_calls` field, so Pi can chat but cannot use tools.
+- **PCC is removed**, so there is no larger window to escape to.
 
-A thin OpenAI client against the `system` model works well; see the next section. Treat
-Pi and comparable agent harnesses as unsupported on Beta 7.
+Pi's own gauge counts only `messages[].content` and reported `0.2%/4.1k` for a request
+that really assembled to 9508. Do not trust it — read the proxy's `[assembled]` line.
 
 ## OpenAI-compatible usage (plug-and-play base URL)
 
@@ -121,7 +136,7 @@ The proxy is a drop-in OpenAI endpoint — point any OpenAI client at it and go:
     streamed and ends the completion with `finish_reason:"content_filter"` — so SDK
     clients receive the partial + a documented finish_reason instead of an exception.
     Deterministic + terminal (retrying the identical request re-fails identically), so
-    don't retry; change the request (rephrase, simplify, or switch to `model=system`).
+    don't retry; change the request (rephrase or simplify — there is no second model).
     Benign code triggers it — it is **not** a judgment that your content is unsafe.
   - `type: "invalid_request_error"` (`code: "invalid_request"`) — any upstream HTTP 400,
     such as an unknown model name or `n > 1`. Terminal: fm serve rejects it in ~7 ms and
@@ -283,13 +298,10 @@ tokens. Through the raw API that is easy — a plain turn frames to 57 tokens, a
 1024px travel-poster test image to 195. Through Pi it is not: Pi's built-in tools alone
 frame to ~11k (`Content contains 11176 tokens, which exceeds the maximum allowed
 context size of 4096`), and even `-nt` with a one-line `--system-prompt` still
-overflows. Measured on Beta 7 through the proxy: `pi-minimal` (`pi -ne -ns -np`)
-assembles to **9508** tokens, of which the toolset is only 499 — the other 9009 are Pi's
-own message content. With `-nt` and a one-line `--system-prompt` the floor is still
-**8397**, over twice the window. So the blocker is Pi's system prompt, not its tools,
-and trimming tools cannot rescue it. Beta 5 and Beta 6 could fall back to `pcc` and its
-32k window; Beta 7 cannot, because `pcc` is gone. An agent client like Pi therefore has
-no route to `fm serve` at all — a thin client is the only workable shape.
+overflows **when the working directory holds a large context file**. In an empty
+directory `pi-minimal` assembles to just 1188 tokens and succeeds; adding this repo's
+`AGENTS.md` takes it to 9582 and it fails. The toolset is only 499 tokens either way, so
+the budget goes to documents, not to the harness. See "Running Pi against fm-proxy".
 
 Pi's own gauge reads `0.2%/4.1k` for a request that really assembles to 9508, because it
 counts only `messages[].content`. Do not trust it; read the proxy's `[assembled]` line.
@@ -349,9 +361,9 @@ streaming chat, streaming usage relay, `stream`-omitted → JSON, structured out
 ### Token usage repair
 
 Apple's `fm serve` used to report usage wrong on both paths — non-streaming sent
-`prompt_tokens: 0`, streaming sent no `usage` at all. **As of Beta 3 (fm 2.0.59),
-non-streaming is fixed**: verified live against `fm token-count`, the reported
-`prompt_tokens` now matches exactly, and it already reflects the **full assembled**
+`prompt_tokens: 0`, streaming sent no `usage` at all. **Non-streaming is fixed**:
+verified live against `fm count-tokens`, the reported
+`prompt_tokens` matches exactly, and it reflects the **full assembled**
 prompt (messages + tool schemas + tool_calls + per-turn framing) — fm serve's own
 number, not an estimate. The proxy passes non-streaming usage through untouched.
 
@@ -363,10 +375,9 @@ on every streaming request it forwards upstream, regardless of what the client s
 captures fm serve's real final usage-only chunk (`choices:[]` + `usage`), and relays
 it to the client — verified live for both plain-text (`finish_reason:"stop"`) and
 tool-call (`finish_reason:"tool_calls"`) completions, `prompt_tokens`/`completion_tokens`
-both accurate. The old completion-text-based estimate (via `fm count-tokens` — renamed
-from `token-count` in Beta 4; the proxy probes both names — with a `9 + chars/4.4`
-heuristic fallback) survives only as a fallback for upstreams that don't cooperate —
-e.g. a pre-Beta-3 `fm serve`, or a safety-guardrail abort that never reaches a clean
+both accurate. The old completion-text-based estimate (via `fm count-tokens`, with a
+`9 + chars/4.4` heuristic fallback) survives only as a fallback for upstreams that
+don't cooperate — e.g. a safety-guardrail abort that never reaches a clean
 finish and so never gets a real usage chunk from fm serve either.
 
 Note: on Beta 7 a one-line message frames to **57** `prompt_tokens`, matching Beta 3 and
