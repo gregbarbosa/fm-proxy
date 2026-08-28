@@ -847,19 +847,24 @@ function relayStreamingChat({ res, proxyRes, diag, commit, isCommitted, fail, is
       total_tokens: promptTokens + completionTokens,
     };
     const meta = lastChunkMeta || {};
+    // Same truncation mislabel as the non-streaming path: fm serve says "stop" even when
+    // it stopped at the cap. Only rewrite a plain stop — never an abort's content_filter.
+    const cappedFinish = (cappedAt != null && !abortFinishReason &&
+                          Number(usage.completion_tokens) >= Number(cappedAt))
+      ? "length" : null;
+    const carriedFinish = abortFinishReason || cappedFinish;
     const finishChunk = {
       id: meta.id || "chatcmpl-proxy",
       object: "chat.completion.chunk",
       created: meta.created || Math.floor(Date.now() / 1000),
       model: meta.model || (parsedReq && parsedReq.model) || "unknown",
-      choices: [{ index: 0, delta: {}, finish_reason: abortFinishReason }],
+      // A usage chunk carries `choices: []` — OpenAI's shape, and fm serve's. Attach a
+      // choices entry ONLY to carry a finish_reason this chunk is the sole source of
+      // (a guardrail abort, or the length rewrite). Emitting `finish_reason: null` here
+      // overwrites the real "stop" for any client that reads the last chunk, which is
+      // how an ordinary completion got reported as truncated.
+      choices: carriedFinish ? [{ index: 0, delta: {}, finish_reason: carriedFinish }] : [],
     };
-    // Same truncation mislabel as the non-streaming path: fm serve says "stop" even when
-    // it stopped at the cap. Only rewrite a plain stop — never an abort's content_filter.
-    if (cappedAt != null && !abortFinishReason &&
-        Number(usage.completion_tokens) >= Number(cappedAt)) {
-      finishChunk.choices[0].finish_reason = "length";
-    }
     // Always suppress upstream's [DONE] and re-emit our own final chunk so clients get
     // real usage. Explicit include_usage:false → no usage field (vanilla OpenAI shape);
     // absent/true keeps the always-on chunk. finish_reason must still go out on an
@@ -867,7 +872,9 @@ function relayStreamingChat({ res, proxyRes, diag, commit, isCommitted, fail, is
     // error frame is swallowed above), so the chunk can't be dropped wholesale.
     if (!clientDeclinedUsage) {
       res.write(`data: ${JSON.stringify({ ...finishChunk, usage })}\n\n`);
-    } else if (abortFinishReason) {
+    } else if (carriedFinish) {
+      // Usage was declined, but a finish_reason this chunk alone carries must still go
+      // out — a length cap as well as a content_filter abort.
       res.write(`data: ${JSON.stringify(finishChunk)}\n\n`);
     }
     res.write("data: [DONE]\n\n");

@@ -1512,9 +1512,13 @@ test("streaming: fm serve's real usage chunk is relayed verbatim, not recomputed
     assert.strictEqual(usageLines.length, 1, `expected exactly one usage chunk:\n${res.body}`);
     const chunk = JSON.parse(usageLines[0].slice(usageLines[0].indexOf("{")));
     assert.deepStrictEqual(chunk.usage, { prompt_tokens: 4242, completion_tokens: 7, total_tokens: 4249 });
-    // The raw upstream usage-only frame (choices:[]) must never leak through
-    // verbatim — only the proxy's own rebuilt final chunk carries usage.
-    assert.ok(!/"choices":\[\]/.test(res.body), `raw usage-only frame leaked through:\n${res.body}`);
+    // Exactly one usage chunk (asserted above) is what proves the raw upstream frame
+    // did not leak through beside the proxy's rebuilt one. `choices: []` is NOT a leak
+    // marker: it is the correct OpenAI shape for a usage chunk, and the proxy now emits
+    // it too rather than a fake `finish_reason: null`.
+    assert.deepStrictEqual(chunk.choices, [], `usage chunk should carry choices:[]:\n${res.body}`);
+    // The real stop must survive on its own chunk, not be overwritten by the last one.
+    assert.ok(/"finish_reason":"stop"/.test(res.body), `stop was lost:\n${res.body}`);
   } finally { await stack.stop(); }
 });
 
@@ -1680,5 +1684,60 @@ test("non-streaming context overflow is typed and not retried", async () => {
       JSON.stringify({ model: "system", stream: false, messages: [{ role: "user", content: "hi" }] }));
     assert.strictEqual(hits, 1, `retried a permanent overflow ${hits} times`);
     assert.ok(res.body.includes('"context_length_exceeded"'), `body=${res.body}`);
+  } finally { await stack.stop(); }
+});
+
+// ── The usage chunk must not fake a finish_reason ────────────────────────────
+// OpenAI's usage chunk (stream_options.include_usage) carries `choices: []`, and so
+// does fm serve's. The proxy re-emits its own final chunk to attach real usage, and it
+// used to build `choices: [{delta:{}, finish_reason: abortFinishReason}]` — which is
+// `null` for an ordinary completion. Clients that read the LAST chunk's finish_reason
+// therefore saw null after a perfectly good "stop", and reported the reply as cut off.
+// Pi shows "Response was truncated before completion." Only attach a choices entry when
+// there is a real finish_reason to carry (a guardrail abort, or a length cap).
+test("streaming: the usage chunk carries choices:[] and never a null finish_reason", async () => {
+  const stack = await startStack({
+    handler: (req, parsed, res) => {
+      res.writeHead(200, { "content-type": "text/event-stream" });
+      res.write('data: {"id":"x","object":"chat.completion.chunk","model":"system","choices":[{"index":0,"delta":{"content":"Hi"}}]}\n\n');
+      res.write('data: {"id":"x","object":"chat.completion.chunk","model":"system","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}\n\n');
+      res.write('data: {"id":"x","object":"chat.completion.chunk","model":"system","choices":[],"usage":{"prompt_tokens":5,"completion_tokens":2,"total_tokens":7}}\n\n');
+      res.write("data: [DONE]\n\n");
+      res.end();
+    },
+  });
+  try {
+    const res = await request(stack.proxyPort,
+      { method: "POST", path: "/v1/chat/completions", headers: { "content-type": "application/json" } },
+      JSON.stringify({ model: "system", stream: true, messages: [{ role: "user", content: "hi" }] }));
+    const chunks = res.body.split("\n").map((l) => l.trim())
+      .filter((l) => l.startsWith("data:") && !l.includes("[DONE]"))
+      .map((l) => JSON.parse(l.slice(5).trim()));
+    const usageChunk = chunks.find((c) => c.usage);
+    assert.ok(usageChunk, "no usage chunk emitted");
+    assert.deepStrictEqual(usageChunk.choices, [], "usage chunk must carry choices:[]");
+    const nulls = chunks.filter((c) => (c.choices || []).some((ch) => ch.finish_reason === null));
+    assert.strictEqual(nulls.length, 0, `a chunk carried finish_reason:null — clients read that as truncation`);
+    const stops = chunks.filter((c) => (c.choices || []).some((ch) => ch.finish_reason === "stop"));
+    assert.strictEqual(stops.length, 1, "the real stop must survive exactly once");
+  } finally { await stack.stop(); }
+});
+
+test("streaming: a length cap still carries finish_reason on the usage chunk", async () => {
+  const stack = await startStack({
+    handler: (req, parsed, res) => {
+      res.writeHead(200, { "content-type": "text/event-stream" });
+      res.write('data: {"id":"x","object":"chat.completion.chunk","model":"system","choices":[{"index":0,"delta":{"content":"1, 2, 3"}}]}\n\n');
+      res.write('data: {"id":"x","object":"chat.completion.chunk","model":"system","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}\n\n');
+      res.write('data: {"id":"x","object":"chat.completion.chunk","model":"system","choices":[],"usage":{"prompt_tokens":5,"completion_tokens":10,"total_tokens":15}}\n\n');
+      res.write("data: [DONE]\n\n");
+      res.end();
+    },
+  });
+  try {
+    const res = await request(stack.proxyPort,
+      { method: "POST", path: "/v1/chat/completions", headers: { "content-type": "application/json" } },
+      JSON.stringify({ model: "system", stream: true, max_tokens: 10, messages: [{ role: "user", content: "count" }] }));
+    assert.ok(/"finish_reason":"length"/.test(res.body), `no length label:\n${res.body}`);
   } finally { await stack.stop(); }
 });
