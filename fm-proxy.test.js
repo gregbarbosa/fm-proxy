@@ -1741,3 +1741,48 @@ test("streaming: a length cap still carries finish_reason on the usage chunk", a
     assert.ok(/"finish_reason":"length"/.test(res.body), `no length label:\n${res.body}`);
   } finally { await stack.stop(); }
 });
+
+// ── Overflow message must be recognisable to clients ─────────────────────────
+// Clients auto-recover from a context overflow (compact-and-retry) by matching the
+// error TEXT, not the code — Pi's patterns are "context length exceeded", "exceeds the
+// context window", "too many tokens", "token limit exceeded". fm serve says "The
+// session's transcript exceeded the model's context size", which matches none of them,
+// so a client that could have compacted and retried instead just gave up. Surface a
+// message carrying the canonical phrase, keeping fm serve's own wording for diagnosis.
+const OVERFLOW_UP = "The session's transcript exceeded the model's context size.";
+
+test("non-streaming overflow surfaces a message clients can match on", async () => {
+  const stack = await startStack({
+    handler: (req, parsed, res) => {
+      res.writeHead(500, { "content-type": "application/json" });
+      res.end(JSON.stringify({ error: { type: "server_error", code: "500", message: OVERFLOW_UP } }));
+    },
+  });
+  try {
+    const res = await request(stack.proxyPort,
+      { method: "POST", path: "/v1/chat/completions", headers: { "content-type": "application/json" } },
+      JSON.stringify({ model: "system", stream: false, messages: [{ role: "user", content: "hi" }] }));
+    const body = JSON.parse(res.body);
+    assert.strictEqual(body.error.code, "context_length_exceeded");
+    assert.match(body.error.message, /context length exceeded/i);
+    // fm serve's own sentence is kept so the upstream cause stays greppable.
+    assert.match(body.error.message, /transcript exceeded the model's context size/);
+  } finally { await stack.stop(); }
+});
+
+test("streaming overflow surfaces the same matchable message", async () => {
+  const stack = await startStack({
+    handler: (req, parsed, res) => {
+      res.writeHead(200, { "content-type": "text/event-stream" });
+      res.write(`data: ${JSON.stringify({ error: { type: "server_error", code: "500", message: OVERFLOW_UP } })}\n\n`);
+      res.end();
+    },
+  });
+  try {
+    const res = await request(stack.proxyPort,
+      { method: "POST", path: "/v1/chat/completions", headers: { "content-type": "application/json" } },
+      JSON.stringify({ model: "system", stream: true, messages: [{ role: "user", content: "hi" }] }));
+    assert.match(res.body, /context length exceeded/i);
+    assert.match(res.body, /"code":"context_length_exceeded"/);
+  } finally { await stack.stop(); }
+});

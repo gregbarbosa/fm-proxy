@@ -476,9 +476,17 @@ function classifyError(msg, status) {
   // types it (`invalid_request_error` / `context_length_exceeded`) so clients can branch
   // on it and trim. The on-device window is 4096 tokens, which agent harnesses overshoot
   // easily, so this is a common failure — it must not cost the full backoff ladder.
+  // `clientMessage` is surfaced in place of fm serve's wording. Clients auto-recover
+  // from an overflow (compact, then retry) by matching the error TEXT rather than the
+  // code — the phrases in the wild are "context length exceeded", "exceeds the context
+  // window", "too many tokens", "token limit exceeded". fm serve's sentence matches
+  // none, so a client that could have recovered simply gave up. Lead with the canonical
+  // phrase and keep Apple's sentence after it, so the upstream cause stays greppable.
   if (m.includes("exceeded the model's context size") || m.includes("exceeds the maximum allowed context"))
     return { type: "invalid_request_error", code: "context_length_exceeded", retry: false,
-             label: "CONTEXT EXCEEDED" };
+             label: "CONTEXT EXCEEDED",
+             clientMessage: "The session's transcript exceeded the model's context size " +
+               "— context length exceeded. Reduce the prompt or compact the conversation." };
   // A genuine rate limit. Do NOT reclassify this on the request's shape: forced
   // tool_choice has its own message (handled above), so any extra reclassification here
   // would only mislabel a real rate limit as a permanent client error and skip the
@@ -501,7 +509,9 @@ function classifyError(msg, status) {
 // Build an SSE error frame (`data: {"error":{...}}\n\n`) carrying a typed OpenAI error.
 function errorFrame(cls, msg) {
   return `data: ${JSON.stringify({
-    error: { message: msg || "upstream error", type: cls.type, code: cls.code },
+    // A classification may carry its own client-facing wording (see classifyError's
+    // overflow branch) — prefer it over upstream's, which clients cannot match on.
+    error: { message: cls.clientMessage || msg || "upstream error", type: cls.type, code: cls.code },
   })}\n\n`;
 }
 
@@ -925,8 +935,9 @@ proxyRes.on("end", () => {
     } else if (retryOrSurface(cls, "non-stream", `— ${raw.slice(0, 200)}`, "non-stream error", fail, diag)) {
       return;
     } else if (obj.error && typeof obj.error === "object") {
-      // terminal (service_unavailable) OR retries exhausted (rate-limit): type it.
-      obj.error = { message: obj.error.message, type: cls.type, code: cls.code };
+      // terminal, or retries exhausted: type it, preferring the classification's own
+      // client-facing wording when it has one (see classifyError's overflow branch).
+      obj.error = { message: cls.clientMessage || obj.error.message, type: cls.type, code: cls.code };
     }
   }
   let out = raw;
