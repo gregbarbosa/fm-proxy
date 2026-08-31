@@ -719,6 +719,12 @@ function relayStreamingChat({ res, proxyRes, diag, commit, isCommitted, fail, is
   let rawTail = "";       // last bytes of the upstream stream, for failure forensics
   let surfacedError = false; // we already forwarded a typed error frame
   let abortFinishReason = null; // set to "content_filter" on a guardrail abort
+  // Under a cap, upstream's finish_reason chunk arrives BEFORE the usage frame, so the
+  // stop-vs-length call cannot be made yet. Hold the value here and let the trailing
+  // chunk emit it once. Relaying it now and adding "length" later put TWO finish_reason
+  // values in one stream, which clients read last-wins: pi saw "length" on a complete
+  // answer and rendered nothing.
+  let heldFinish = null;
   // A stream can open with an empty {"delta":{"role":"assistant"}} preamble, THEN
   // either output or an error frame — don't commit the head on the preamble or a
   // following error looks post-commit and unretryable; buffer and commit on meaning.
@@ -731,7 +737,7 @@ function relayStreamingChat({ res, proxyRes, diag, commit, isCommitted, fail, is
     let idx;
     while ((idx = pending.indexOf("\n")) !== -1 || (flush && pending.length)) {
       if (isAborting()) return;
-      const line = idx !== -1 ? pending.slice(0, idx + 1) : pending;
+      let line = idx !== -1 ? pending.slice(0, idx + 1) : pending;
       pending = idx !== -1 ? pending.slice(idx + 1) : "";
       const t = line.trim();
       let obj = null, isErr = false, errCls = null, meaningful = false;
@@ -751,7 +757,16 @@ function relayStreamingChat({ res, proxyRes, diag, commit, isCommitted, fail, is
           } else {
             lastChunkMeta = { id: obj.id, model: obj.model, created: obj.created };
             const ch0 = obj.choices && obj.choices[0];
-            if (ch0 && ch0.finish_reason) { sawFinish = true; meaningful = true; }
+            if (ch0 && ch0.finish_reason) {
+              sawFinish = true; meaningful = true;
+              if (cappedAt != null) {
+                heldFinish = ch0.finish_reason;
+                delete ch0.finish_reason;
+                // Relay the chunk with the reason stripped rather than dropping it, so
+                // the SSE framing stays one event per upstream event.
+                line = line.replace(payload, JSON.stringify(obj));
+              }
+            }
             const delta = ch0 && ch0.delta;
             if (delta && typeof delta.content === "string") {
               if (tFirstToken == null) tFirstToken = Date.now();
@@ -862,7 +877,9 @@ function relayStreamingChat({ res, proxyRes, diag, commit, isCommitted, fail, is
     const cappedFinish = (cappedAt != null && !abortFinishReason &&
                           Number(usage.completion_tokens) >= Number(cappedAt))
       ? "length" : null;
-    const carriedFinish = abortFinishReason || cappedFinish;
+    // Exactly one finish_reason leaves this relay: an abort wins, then the length
+    // rewrite, then whatever upstream said and this chunk held back.
+    const carriedFinish = abortFinishReason || cappedFinish || heldFinish;
     const finishChunk = {
       id: meta.id || "chatcmpl-proxy",
       object: "chat.completion.chunk",

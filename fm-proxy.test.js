@@ -1742,6 +1742,75 @@ test("streaming: a length cap still carries finish_reason on the usage chunk", a
   } finally { await stack.stop(); }
 });
 
+// ── A capped stream must carry exactly one finish_reason ────────────────────
+// The cap logic used to APPEND a finish_reason: upstream sent "stop" on its own chunk,
+// then the trailing usage chunk added "length". One stream carried two values, and a
+// client that reads the last one reported a complete answer as truncated. pi rendered
+// nothing at all. Upstream's chunk now relays with the reason stripped, and the trailing
+// chunk is the single source. The non-streaming path always rewrote in place.
+const countFinishReasons = (body) => (body.match(/"finish_reason":"[a-z_]+"/g) || []).length;
+
+const cappedStack = (completionTokens) => startStack({
+  handler: (req, parsed, res) => {
+    res.writeHead(200, { "content-type": "text/event-stream" });
+    res.write('data: {"id":"x","object":"chat.completion.chunk","model":"system","choices":[{"index":0,"delta":{"content":"1, 2, 3"}}]}\n\n');
+    res.write('data: {"id":"x","object":"chat.completion.chunk","model":"system","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}\n\n');
+    res.write(`data: {"id":"x","object":"chat.completion.chunk","model":"system","choices":[],"usage":{"prompt_tokens":5,"completion_tokens":${completionTokens},"total_tokens":${5 + completionTokens}}}\n\n`);
+    res.write("data: [DONE]\n\n");
+    res.end();
+  },
+});
+
+const capReq = (port, body) => request(port,
+  { method: "POST", path: "/v1/chat/completions", headers: { "content-type": "application/json" } },
+  JSON.stringify({ model: "system", stream: true, messages: [{ role: "user", content: "count" }], ...body }));
+
+test("streaming: a cap AT the completion length emits one finish_reason, not two", async () => {
+  const stack = await cappedStack(10);
+  try {
+    const res = await capReq(stack.proxyPort, { max_tokens: 10 });
+    assert.strictEqual(countFinishReasons(res.body), 1, `expected one finish_reason:\n${res.body}`);
+    assert.ok(/"finish_reason":"length"/.test(res.body), `no length label:\n${res.body}`);
+  } finally { await stack.stop(); }
+});
+
+test("streaming: a cap BELOW the completion length emits one finish_reason", async () => {
+  const stack = await cappedStack(10);
+  try {
+    const res = await capReq(stack.proxyPort, { max_completion_tokens: 1 });
+    assert.strictEqual(countFinishReasons(res.body), 1, `expected one finish_reason:\n${res.body}`);
+    assert.ok(/"finish_reason":"length"/.test(res.body), `no length label:\n${res.body}`);
+  } finally { await stack.stop(); }
+});
+
+test("streaming: a cap ABOVE the completion length keeps the real stop, once", async () => {
+  const stack = await cappedStack(3);
+  try {
+    const res = await capReq(stack.proxyPort, { max_tokens: 500 });
+    assert.strictEqual(countFinishReasons(res.body), 1, `expected one finish_reason:\n${res.body}`);
+    assert.ok(/"finish_reason":"stop"/.test(res.body), `stop was lost:\n${res.body}`);
+    assert.ok(!/"finish_reason":"length"/.test(res.body), `mislabelled as length:\n${res.body}`);
+  } finally { await stack.stop(); }
+});
+
+test("streaming: an uncapped request is untouched and still carries one stop", async () => {
+  const stack = await cappedStack(3);
+  try {
+    const res = await capReq(stack.proxyPort, {});
+    assert.strictEqual(countFinishReasons(res.body), 1, `expected one finish_reason:\n${res.body}`);
+    assert.ok(/"finish_reason":"stop"/.test(res.body), `stop was lost:\n${res.body}`);
+  } finally { await stack.stop(); }
+});
+
+test("streaming: a cap with include_usage:false still emits exactly one finish_reason", async () => {
+  const stack = await cappedStack(10);
+  try {
+    const res = await capReq(stack.proxyPort, { max_tokens: 10, stream_options: { include_usage: false } });
+    assert.strictEqual(countFinishReasons(res.body), 1, `expected one finish_reason:\n${res.body}`);
+    assert.ok(/"finish_reason":"length"/.test(res.body), `no length label:\n${res.body}`);
+  } finally { await stack.stop(); }
+});
+
 // ── Overflow message must be recognisable to clients ─────────────────────────
 // Clients auto-recover from a context overflow (compact-and-retry) by matching the
 // error TEXT, not the code — Pi's patterns are "context length exceeded", "exceeds the

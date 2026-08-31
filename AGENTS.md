@@ -184,7 +184,7 @@ identical behaviour. Every wall reproduces:
 | `stream` omitted | `text/event-stream` | Same |
 | `n > 1` | `400` | Same |
 | `hello world` framing | 57 `prompt_tokens` | Same |
-| Context window | 4055 tokens pass, 9089 overflow | Same |
+| Context window | 4055 tokens pass, 8055 overflow | Same |
 | `$defs` non-cyclic + dialect | `200` | Same |
 | Titled string needs a non-empty `enum` | `400` without, `200` with | Same |
 | Bare `$defs`, no dialect | `400` on `x-order` | Same |
@@ -211,18 +211,21 @@ audit found it. `pi` prints nothing for a `-p` prompt through port 1977, but pri
 normally through a bare pass-through to `fm serve`, and prints normally against another
 provider. See "A streaming cap emits two finish_reason values" below.
 
-#### A streaming cap emits two finish_reason values
+#### A streaming cap emitted two finish_reason values — fixed
 
-The streaming cap logic appends a `finish_reason` instead of rewriting one. Upstream
+The streaming cap logic appended a `finish_reason` instead of rewriting one. Upstream
 sends `finish_reason: "stop"` on its own chunk before the usage frame arrives. The proxy
-then adds a second `finish_reason: "length"` on the trailing usage chunk whenever
-`completion_tokens >= max_completion_tokens`. One stream therefore carries two
-`finish_reason` values. The non-streaming path does not have this defect: it rewrites the
+then added a second `finish_reason: "length"` on the trailing usage chunk whenever
+`completion_tokens >= max_completion_tokens`. One stream therefore carried two
+`finish_reason` values. The non-streaming path never had this defect: it rewrites the
 value in place.
 
-The cap also does not truncate. The full completion text still reaches the client.
+The fix holds the reason back. When a cap is set, upstream's chunk relays with
+`finish_reason` stripped, and the trailing chunk is the single source. An abort wins over
+the length rewrite, which wins over whatever upstream said. Uncapped requests are
+untouched. Five tests pin it, and the whole suite is 107 passing.
 
-Reproduce it with any cap at or below the real completion length:
+Before the fix, with a cap at or below the real completion length:
 
 | Request | `finish_reason` values in the stream |
 |---|---|
@@ -231,15 +234,37 @@ Reproduce it with any cap at or below the real completion length:
 | `max_tokens: 3` on a 3-token reply | `["stop", "length"]` |
 | `max_tokens: 1` on a 3-token reply | `["stop", "length"]` |
 
+Every one of those now returns a single value.
+
+Note what the fix does not do. The cap never truncates the text, because `fm serve`
+already truncated it, and the `completion_tokens >= cap` test still over-reports: it
+compares a usage count that includes framing against a cap that does not. Both are the
+documented intent — under-reporting a truncation is the worse error — so both stay.
+
+The trigger is the comparison itself. The proxy tests the usage `completion_tokens`
+against the cap, and usage counts more tokens than the capped content, so a complete
+answer compares as truncated. `hello`-sized replies report 3 `completion_tokens`, which
+is `>=` any cap of 3 or less.
+
+`fm serve` does honour `max_completion_tokens` and does ignore `max_tokens`, unchanged
+from the note at `fm-proxy.js:613`. Re-verified on Beta 8: "count to 100" with
+`max_completion_tokens: 10` returns exactly 10 tokens, with `max_tokens: 10` returns
+391.
+
 This breaks `pi`. `pi` sends `max_completion_tokens: 1`, captured from a recording
-pass-through. `fm serve` ignores that field, so a direct connection returns `["stop"]`
-and `pi` prints the answer. Through the proxy `pi` reads the last `finish_reason`,
+pass-through. Through that bare pass-through `pi` prints a one-token answer, because
+`fm serve` returns `["stop"]`. Through the proxy `pi` reads the trailing `"length"`,
 treats the turn as truncated, and renders nothing. `pi --mode json` shows the text did
 arrive, with `"stopReason": "length"`.
 
-Why `pi` chooses `1` is not established. Changing `compaction.reserveTokens` and the
-model's `maxTokens` in `~/.pi/agent/` did not move it, which points at a cached model
-catalogue rather than the live settings.
+`tools/harness-check.sh` still reports 6 passed, 1 failed, and that is correct. With a
+1-token cap the honest label is `length`, and `pi` hides a turn it believes was
+truncated. The remaining fault is the 1-token budget itself.
+
+`pi` sends `1` no matter what. `compaction.reserveTokens` at 8192, 1024 and 512, and the
+model's `maxTokens` at 4096 and 512, all produced the same captured `1`, and
+`models-store.json` holds no FM entry to shadow `models.json`. The cause is inside `pi`
+and is not this project's to fix.
 
 ### Beta 7 (fm 2.0.68.1.402, build 26A5421a) — PCC removed
 
