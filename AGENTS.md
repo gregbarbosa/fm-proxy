@@ -34,13 +34,13 @@ version is on disk, so regenerate rather than hand-editing.
 `fm --version` does **not** exist (errors "Unknown option"). To detect when Apple ships a
 new `fm`/FoundationModels build across macOS betas, fingerprint the binary:
 
-| What | How | Beta 2 value | Beta 3 value | Beta 4 value | Beta 5 value | Beta 6 value | Beta 7 value |
-|---|---|---|---|---|---|---|---|
-| fm source version | `otool -l /usr/bin/fm \| grep -A2 LC_SOURCE_VERSION` | `2.0.55.1.402` | `2.0.59` | `2.0.62.1.402` | `2.0.68.1.401` | `2.0.68.1.401` | `2.0.68.1.402` |
-| Framework version | `plutil -p /System/Library/Frameworks/FoundationModels.framework/Resources/Info.plist \| grep CFBundleVersion` | `2.0.55.1.402` | `2.0.59` | `2.0.62.1.402` | `2.0.68.1.401` | `2.0.68.1.401` | `2.0.68.1.402` |
-| Runtime version | `codesign -dvvv /usr/bin/fm` → `Runtime Version=` | `27.0.0` | `27.0.0` | `27.0.0` | `27.0.0` | `27.0.0` | `27.0.0` |
-| Rebuild date | `ls -la /usr/bin/fm` (mtime) | Jun 19 2026 | Jul 3 2026 | Jul 17 2026 | Aug 7 2026 | Aug 14 2026 | Aug 21 2026 |
-| macOS build | `sw_vers` → `BuildVersion` | `26A5368g` (27.0 Beta 2) | `26A5378j` (27.0 Beta 3) | `26A5388g` (27.0 Beta 4) | `26A5406e` (27.0 Beta 5) | `26A5416b` (27.0 Beta 6) | `26A5421a` (27.0 Beta 7) |
+| What | How | Beta 2 value | Beta 3 value | Beta 4 value | Beta 5 value | Beta 6 value | Beta 7 value | Beta 8 value |
+|---|---|---|---|---|---|---|---|---|
+| fm source version | `otool -l /usr/bin/fm \| grep -A2 LC_SOURCE_VERSION` | `2.0.55.1.402` | `2.0.59` | `2.0.62.1.402` | `2.0.68.1.401` | `2.0.68.1.401` | `2.0.68.1.402` | `2.0.68.1.402` |
+| Framework version | `plutil -p /System/Library/Frameworks/FoundationModels.framework/Resources/Info.plist \| grep CFBundleVersion` | `2.0.55.1.402` | `2.0.59` | `2.0.62.1.402` | `2.0.68.1.401` | `2.0.68.1.401` | `2.0.68.1.402` | `2.0.68.1.402` |
+| Runtime version | `codesign -dvvv /usr/bin/fm` → `Runtime Version=` | `27.0.0` | `27.0.0` | `27.0.0` | `27.0.0` | `27.0.0` | `27.0.0` | `27.0.0` |
+| Rebuild date | `ls -la /usr/bin/fm` (mtime) | Jun 19 2026 | Jul 3 2026 | Jul 17 2026 | Aug 7 2026 | Aug 14 2026 | Aug 21 2026 | Aug 27 2026 |
+| macOS build | `sw_vers` → `BuildVersion` | `26A5368g` (27.0 Beta 2) | `26A5378j` (27.0 Beta 3) | `26A5388g` (27.0 Beta 4) | `26A5406e` (27.0 Beta 5) | `26A5416b` (27.0 Beta 6) | `26A5421a` (27.0 Beta 7) | `26A5425a` (27.0 Beta 8) |
 
 Audit recipe after any OS update:
 
@@ -162,6 +162,54 @@ The proxy is a drop-in OpenAI endpoint — point any OpenAI client at it and go:
   - `type: "server_error"` (`code: "internal_error"` / `"upstream_unreachable"`) —
     anything else, including the `502` when `fm serve` is down.
 
+### Beta 8 (fm 2.0.68.1.402, build 26A5425a) — no change
+
+Audited 2026-08-31 against a live `fm serve` on `system`. Apple rebuilt the binary on
+Aug 27 2026, but shipped no change that this project can detect. Treat the Beta 7
+section below as the current description of upstream behaviour.
+
+The source version, the framework version, and the runtime version all hold at
+`2.0.68.1.402` / `27.0.0`. `python3 tools/gen-fm-docs.py` produces a CLI tree that is
+byte-identical to the committed one, so the diff is empty. Only the mtime moved. This
+repeats the Beta 6 pattern: a rebuild with no new surface.
+
+The behaviour layer was re-run in full, because an identical tree does not prove
+identical behaviour. Every wall reproduces:
+
+| Check | Beta 7 | Beta 8 |
+|---|---|---|
+| Tool calling | `tool_calls` null, content is clean JSON | Same |
+| Forced `tool_choice` | `500` unsupported generation guide | Same |
+| Tool with no `function.description` | `400` | Same |
+| `stream` omitted | `text/event-stream` | Same |
+| `n > 1` | `400` | Same |
+| `hello world` framing | 57 `prompt_tokens` | Same |
+| Context window | 4055 tokens pass, 9089 overflow | Same |
+| `$defs` non-cyclic + dialect | `200` | Same |
+| Titled string needs a non-empty `enum` | `400` without, `200` with | Same |
+| Bare `$defs`, no dialect | `400` on `x-order` | Same |
+| `array<array<object>>` tool param | `200` | Same |
+| `$defs` **cyclic** + dialect | Hangs, poisons the server | Same |
+| Vision | Describes a 256 px PNG correctly | Same, 130 `prompt_tokens` |
+| PCC | Absent from the binary | Same |
+
+The cyclic `$defs` hang is still the one live hazard upstream. A dialect-decorated
+`{Node: {child: $ref Node}}` sent straight to `fm serve` never answers, and `fm serve`
+answers nothing afterwards until you restart it. The proxy's guard from `57f26d3` still
+catches it first: through port 1977 the same request returns `400` / `cyclic_schema` in
+about 140 ms, and the proxy stays healthy.
+
+Licence acceptance survived the OS update again. `sudo fm license` was not needed.
+
+#### Test results
+
+All 102 unit tests pass. The wire baseline records the same 14 cases and 3 endpoints.
+`tools/harness-check.sh` reports 6 passed, 1 failed. The one failure is **not** an `fm`
+regression: `pi` 0.84.4 now prints nothing at all for a `-p` prompt. The proxy log shows
+`pi` connecting and receiving a valid `200`, so the round trip works and only `pi`'s
+output is missing. The check therefore misses its `KNOWN` branch, which matches on the
+overflow text, and falls through to a failure with an empty message.
+
 ### Beta 7 (fm 2.0.68.1.402, build 26A5421a) — PCC removed
 
 Audited 2026-08-26 against a live `fm serve` on `system`. This is the first `fm` change
@@ -250,7 +298,7 @@ was "use `pcc`". With `pcc` removed there is no longer any way to run `pi` again
 
 ### Release history before Beta 7
 
-Beta 7 is the only supported build. The proxy no longer carries code for earlier ones.
+Beta 7 and Beta 8 are the supported builds, and they behave identically. The proxy no longer carries code for earlier ones.
 Kept as a short record of how the upstream behaviour arrived where it is:
 
 | Build | `fm` | What it changed |
