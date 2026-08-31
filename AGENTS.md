@@ -204,11 +204,42 @@ Licence acceptance survived the OS update again. `sudo fm license` was not neede
 #### Test results
 
 All 102 unit tests pass. The wire baseline records the same 14 cases and 3 endpoints.
-`tools/harness-check.sh` reports 6 passed, 1 failed. The one failure is **not** an `fm`
-regression: `pi` 0.84.4 now prints nothing at all for a `-p` prompt. The proxy log shows
-`pi` connecting and receiving a valid `200`, so the round trip works and only `pi`'s
-output is missing. The check therefore misses its `KNOWN` branch, which matches on the
-overflow text, and falls through to a failure with an empty message.
+`tools/harness-check.sh` reports 6 passed, 1 failed.
+
+The failure is **not** an upstream change. It is a regression in this proxy, and the
+audit found it. `pi` prints nothing for a `-p` prompt through port 1977, but prints
+normally through a bare pass-through to `fm serve`, and prints normally against another
+provider. See "A streaming cap emits two finish_reason values" below.
+
+#### A streaming cap emits two finish_reason values
+
+The streaming cap logic appends a `finish_reason` instead of rewriting one. Upstream
+sends `finish_reason: "stop"` on its own chunk before the usage frame arrives. The proxy
+then adds a second `finish_reason: "length"` on the trailing usage chunk whenever
+`completion_tokens >= max_completion_tokens`. One stream therefore carries two
+`finish_reason` values. The non-streaming path does not have this defect: it rewrites the
+value in place.
+
+The cap also does not truncate. The full completion text still reaches the client.
+
+Reproduce it with any cap at or below the real completion length:
+
+| Request | `finish_reason` values in the stream |
+|---|---|
+| `max_tokens` omitted | `["stop"]` |
+| `max_tokens: 50` on a 3-token reply | `["stop"]` |
+| `max_tokens: 3` on a 3-token reply | `["stop", "length"]` |
+| `max_tokens: 1` on a 3-token reply | `["stop", "length"]` |
+
+This breaks `pi`. `pi` sends `max_completion_tokens: 1`, captured from a recording
+pass-through. `fm serve` ignores that field, so a direct connection returns `["stop"]`
+and `pi` prints the answer. Through the proxy `pi` reads the last `finish_reason`,
+treats the turn as truncated, and renders nothing. `pi --mode json` shows the text did
+arrive, with `"stopReason": "length"`.
+
+Why `pi` chooses `1` is not established. Changing `compaction.reserveTokens` and the
+model's `maxTokens` in `~/.pi/agent/` did not move it, which points at a cached model
+catalogue rather than the live settings.
 
 ### Beta 7 (fm 2.0.68.1.402, build 26A5421a) — PCC removed
 
