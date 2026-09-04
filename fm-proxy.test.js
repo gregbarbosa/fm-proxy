@@ -1811,6 +1811,39 @@ test("streaming: a cap with include_usage:false still emits exactly one finish_r
   } finally { await stack.stop(); }
 });
 
+test("streaming: a capped chunk carrying both content and finish_reason survives $ in the text", async () => {
+  // Two gaps in one: the rewrite path had never been exercised with a NON-empty delta,
+  // and String.replace with a string replacement expands $&, $`, $' and $n out of the
+  // completion text. That turned the relayed frame into unparseable JSON. fm serve puts
+  // finish_reason on a bare {delta:{}} chunk so it cannot trigger this, but any upstream
+  // that bundles the last content with finish_reason can.
+  const TEXT = "it costs $& more, $` and $' and $1 too";
+  const stack = await startStack({
+    handler: (req, parsed, res) => {
+      res.writeHead(200, { "content-type": "text/event-stream" });
+      res.write(`data: ${JSON.stringify({ id: "x", object: "chat.completion.chunk", model: "system",
+        choices: [{ index: 0, delta: { content: TEXT }, finish_reason: "stop" }] })}\n\n`);
+      res.write('data: {"id":"x","object":"chat.completion.chunk","model":"system","choices":[],"usage":{"prompt_tokens":5,"completion_tokens":3,"total_tokens":8}}\n\n');
+      res.write("data: [DONE]\n\n");
+      res.end();
+    },
+  });
+  try {
+    const res = await request(stack.proxyPort,
+      { method: "POST", path: "/v1/chat/completions", headers: { "content-type": "application/json" } },
+      JSON.stringify({ model: "system", stream: true, max_tokens: 500, messages: [{ role: "user", content: "hi" }] }));
+    // Every data frame must still parse, and the text must round-trip byte for byte.
+    let seen = "";
+    for (const line of res.body.split("\n")) {
+      if (!line.startsWith("data: ") || line.includes("[DONE]")) continue;
+      const obj = JSON.parse(line.slice(6)); // throws if the replacement corrupted it
+      seen += (obj.choices && obj.choices[0] && obj.choices[0].delta && obj.choices[0].delta.content) || "";
+    }
+    assert.strictEqual(seen, TEXT, `completion text was mangled:\n${res.body}`);
+    assert.strictEqual(countFinishReasons(res.body), 1, `expected one finish_reason:\n${res.body}`);
+  } finally { await stack.stop(); }
+});
+
 // ── Overflow message must be recognisable to clients ─────────────────────────
 // Clients auto-recover from a context overflow (compact-and-retry) by matching the
 // error TEXT, not the code — Pi's patterns are "context length exceeded", "exceeds the

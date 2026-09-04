@@ -763,8 +763,13 @@ function relayStreamingChat({ res, proxyRes, diag, commit, isCommitted, fail, is
                 heldFinish = ch0.finish_reason;
                 delete ch0.finish_reason;
                 // Relay the chunk with the reason stripped rather than dropping it, so
-                // the SSE framing stays one event per upstream event.
-                line = line.replace(payload, JSON.stringify(obj));
+                // the SSE framing stays one event per upstream event. The replacement
+                // MUST be a function: a string replacement makes String.replace expand
+                // $&, $`, $' and $n out of the completion text, which corrupts the frame
+                // into unparseable JSON. Replacing in place (rather than rebuilding the
+                // line) also keeps the flush path right, where the line has no trailing
+                // newline to re-add.
+                line = line.replace(payload, () => JSON.stringify(obj));
               }
             }
             const delta = ch0 && ch0.delta;

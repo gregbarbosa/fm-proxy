@@ -223,7 +223,15 @@ value in place.
 The fix holds the reason back. When a cap is set, upstream's chunk relays with
 `finish_reason` stripped, and the trailing chunk is the single source. An abort wins over
 the length rewrite, which wins over whatever upstream said. Uncapped requests are
-untouched. Five tests pin it, and the whole suite is 107 passing.
+untouched. Six tests pin it, and the whole suite is 108 passing.
+
+An adversarial re-read of that fix found a second defect in it, repaired in the
+commit that follows it.
+The rewrite used `String.replace` with a string replacement, which expands `$&`,
+`` $` ``, `$'` and `$n` out of the completion text and turns the frame into unparseable
+JSON. It needs a function replacement. `fm serve` cannot trigger it, because it puts
+`finish_reason` on a bare `{delta:{}}` chunk with no text, so the defect was latent here.
+Any upstream that bundles the last content with `finish_reason` would hit it.
 
 Before the fix, with a cap at or below the real completion length:
 
