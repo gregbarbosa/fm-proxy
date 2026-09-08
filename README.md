@@ -77,11 +77,10 @@ Tested on macOS 27.0 Beta 7 (`26A5421a`), which ships `fm` 2.0.68.1.402.
 > instead, with `400` `cyclic_schema` naming the definition, before it opens an upstream
 > connection. Send a recursive schema to `fm serve` directly and you still lose it.
 
-`n > 1` and `parallel_tool_calls` are accepted and then ignored by `fm serve`. Sampling
-parameters pass through unchanged.
-
-`n > 1` and `parallel_tool_calls` are accepted and then ignored by `fm serve`. Sampling
-parameters pass through unchanged.
+`fm serve` rejects `n > 1` with `400 n=3 is not supported. Only a single completion per
+request is implemented.` The proxy types that as `invalid_request_error` and does not
+retry it. `parallel_tool_calls` is accepted and then ignored. Sampling parameters pass
+through unchanged.
 
 ## Requirements
 

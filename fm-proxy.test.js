@@ -4,7 +4,7 @@ const assert = require("node:assert");
 const http = require("node:http");
 const { spawn } = require("node:child_process");
 const path = require("node:path");
-const { fixToolSchema, fixTools, fixResponseFormatSchema, findCyclicDefs, expandToolCallArguments, classifyError, errorFrame, fmTokenCount, _isLicenseGate } = require("./fm-proxy.js");
+const { fixToolSchema, fixTools, fixResponseFormatSchema, findCyclicDefs, classifyError, errorFrame, fmTokenCount, _isLicenseGate } = require("./fm-proxy.js");
 
 // fm serve (Beta 3 / fm 2.0.59) fixed the GenerationSchema `duplicateType` bug that
 // used to force EVERY nested object through a JSON-string round-trip, and Beta 4
@@ -84,13 +84,12 @@ test("_isLicenseGate does not latch on unrelated failures", () => {
 // pydantic and zod-to-json-schema emit exactly that shape for any named type, so
 // fixToolSchema resolves refs before simplifying.
 test("a $ref tool parameter is resolved, not flattened to an empty schema", () => {
-  const { schema, jsonFields } = fixToolSchema({
+  const schema = fixToolSchema({
     type: "object",
     properties: { home: { $ref: "#/$defs/Address" }, name: { type: "string" } },
     required: ["home", "name"],
     $defs: { Address: { type: "object", properties: { street: { type: "string" }, city: { type: "string" } }, required: ["street", "city"] } },
   });
-  assert.deepStrictEqual(jsonFields, [], "plain nesting decodes natively, no round-trip");
   assert.deepStrictEqual(schema.properties.home, {
     type: "object",
     properties: { street: { type: "string" }, city: { type: "string" } },
@@ -99,20 +98,19 @@ test("a $ref tool parameter is resolved, not flattened to an empty schema", () =
   assert.deepStrictEqual(schema.required, ["home", "name"]);
 });
 
-test("a $ref that lands on array<array<object>> is still detected and round-tripped", () => {
-  // Before refs were resolved this shape was invisible: the parameter became `{}` and
-  // the round-trip never fired, so the broken shape reached fm serve unnoticed.
-  const { schema, jsonFields } = fixToolSchema({
+test("a $ref that lands on array<array<object>> resolves and passes through natively", () => {
+  // Unresolved, the parameter became `{}` and the shape reached fm serve unnoticed.
+  const schema = fixToolSchema({
     type: "object",
     properties: { grid: { $ref: "#/$defs/Grid" } },
     $defs: { Grid: { type: "array", items: { type: "array", items: { type: "object", properties: { x: { type: "number" } } } } } },
   });
-  assert.deepStrictEqual(jsonFields, ["grid"]);
-  assert.strictEqual(schema.properties.grid.type, "string");
+  assert.strictEqual(schema.properties.grid.type, "array");
+  assert.strictEqual(schema.properties.grid.items.items.type, "object");
 });
 
 test("a cyclic $ref tool parameter does not hang and degrades to the old behaviour", () => {
-  const { schema } = fixToolSchema({
+  const schema = fixToolSchema({
     type: "object",
     properties: { node: { $ref: "#/$defs/Node" } },
     $defs: { Node: { type: "object", properties: { child: { $ref: "#/$defs/Node" } } } },
@@ -120,29 +118,27 @@ test("a cyclic $ref tool parameter does not hang and degrades to the old behavio
   assert.deepStrictEqual(schema.properties.node, {});
 });
 
-test("single-level nested object param passes through natively (no round-trip)", () => {
-  const { schema, jsonFields } = fixToolSchema({
+test("single-level nested object param passes through natively", () => {
+  const schema = fixToolSchema({
     properties: { filter: { type: "object", properties: { q: { type: "string" } }, required: ["q"] } },
   });
-  assert.deepStrictEqual(jsonFields, []);
   assert.strictEqual(schema.properties.filter.type, "object");
   assert.strictEqual(schema.properties.filter.properties.q.type, "string");
   assert.deepStrictEqual(schema.properties.filter.required, ["q"]);
 });
 
 test("object with properties but NO explicit type is normalized to type:object, not flattened", () => {
-  const { schema, jsonFields } = fixToolSchema({
+  const schema = fixToolSchema({
     properties: {
       items: { type: "array", items: { properties: { id: { type: "string" } } } },
     },
   });
-  assert.deepStrictEqual(jsonFields, []);
   assert.strictEqual(schema.properties.items.items.type, "object");
   assert.strictEqual(schema.properties.items.items.properties.id.type, "string");
 });
 
 test("array<object> (single array level) passes through natively", () => {
-  const { schema, jsonFields } = fixToolSchema({
+  const schema = fixToolSchema({
     properties: {
       edits: {
         type: "array",
@@ -150,13 +146,12 @@ test("array<object> (single array level) passes through natively", () => {
       },
     },
   });
-  assert.deepStrictEqual(jsonFields, []);
   assert.strictEqual(schema.properties.edits.items.type, "object");
   assert.deepStrictEqual(schema.properties.edits.items.required, ["old", "new"]);
 });
 
 test("object chain depth 2 (object containing object) passes through natively", () => {
-  const { schema, jsonFields } = fixToolSchema({
+  const schema = fixToolSchema({
     properties: {
       a: {
         type: "object",
@@ -165,13 +160,12 @@ test("object chain depth 2 (object containing object) passes through natively", 
       },
     },
   });
-  assert.deepStrictEqual(jsonFields, []);
   assert.strictEqual(schema.properties.a.properties.b.type, "object");
   assert.strictEqual(schema.properties.a.properties.b.properties.val.type, "string");
 });
 
 test("object -> array -> object passes through natively (the array resets the object chain)", () => {
-  const { schema, jsonFields } = fixToolSchema({
+  const schema = fixToolSchema({
     properties: {
       order: {
         type: "object",
@@ -186,33 +180,32 @@ test("object -> array -> object passes through natively (the array resets the ob
       },
     },
   });
-  assert.deepStrictEqual(jsonFields, []);
   assert.strictEqual(schema.properties.order.properties.items.items.type, "object");
 });
 
-test("array<array<object>> still needs the JSON-string round-trip (fm serve silently drops it otherwise)", () => {
-  const { schema, jsonFields } = fixToolSchema({
+test("array<array<object>> passes through natively (Beta 7 decodes it; earlier betas needed a round-trip)", () => {
+  const schema = fixToolSchema({
     properties: {
       grid: { type: "array", items: { type: "array", items: { type: "object", properties: { x: { type: "number" } } } } },
     },
   });
-  assert.deepStrictEqual(jsonFields, ["grid"]);
-  assert.strictEqual(schema.properties.grid.type, "string");
+  assert.strictEqual(schema.properties.grid.type, "array");
+  assert.strictEqual(schema.properties.grid.items.type, "array");
+  assert.strictEqual(schema.properties.grid.items.items.type, "object");
 });
 
-test("array<array<number>> (primitive leaf) passes through natively — only object leaves round-trip", () => {
-  const { schema, jsonFields } = fixToolSchema({
+test("array<array<number>> (primitive leaf) passes through natively", () => {
+  const schema = fixToolSchema({
     properties: { grid: { type: "array", items: { type: "array", items: { type: "number" } } } },
   });
-  assert.deepStrictEqual(jsonFields, []);
   assert.strictEqual(schema.properties.grid.items.type, "array");
   assert.strictEqual(schema.properties.grid.items.items.type, "number");
 });
 
-test("a chain of 3+ directly-nested objects passes through natively (fixed in Beta 4 / fm 2.0.62)", () => {
+test("a chain of 3+ directly-nested objects passes through natively", () => {
   // Beta 3 leaked internal $defs registration for 3+ chains; Beta 4 decodes them
-  // correctly (verified live 5/5 on system and pcc, incl. a 4-level chain).
-  const { schema, jsonFields } = fixToolSchema({
+  // correctly (verified live 5/5, incl. a 4-level chain).
+  const schema = fixToolSchema({
     properties: {
       a: {
         type: "object",
@@ -227,14 +220,13 @@ test("a chain of 3+ directly-nested objects passes through natively (fixed in Be
       },
     },
   });
-  assert.deepStrictEqual(jsonFields, []);
   assert.strictEqual(schema.properties.a.type, "object");
   assert.strictEqual(schema.properties.a.properties.b.properties.c.type, "object");
   assert.strictEqual(schema.properties.a.properties.b.properties.c.properties.val.type, "string");
 });
 
 test("anyOf picks the typed branch, strips the keyword", () => {
-  const { schema } = fixToolSchema({
+  const schema = fixToolSchema({
     properties: { v: { anyOf: [{ type: "null" }, { type: "string", enum: ["a", "b"] }] } },
   });
   assert.ok(!("anyOf" in schema.properties.v), "anyOf leaked");
@@ -242,7 +234,7 @@ test("anyOf picks the typed branch, strips the keyword", () => {
 });
 
 test("primitive params survive untouched (minus stripped keys)", () => {
-  const { schema } = fixToolSchema({
+  const schema = fixToolSchema({
     properties: { n: { type: "integer", minimum: 0, description: "count" } },
   });
   assert.strictEqual(schema.properties.n.type, "integer");
@@ -250,11 +242,10 @@ test("primitive params survive untouched (minus stripped keys)", () => {
   assert.ok(!("description" in schema.properties.n)); // STRIP_KEYS drops description
 });
 
-test("required list is preserved for a round-tripped field (array<array<object>>)", () => {
-  // path is a plain string, grid is array<array<object>> -> still JSON-string
-  // round-tripped (see the residual-shapes comment above). Both are required; the
+test("required list is preserved for a deeply nested field (array<array<object>>)", () => {
+  // path is a plain string, grid is array<array<object>>. Both are required; the
   // model must not be told they are optional.
-  const { schema } = fixToolSchema({
+  const schema = fixToolSchema({
     properties: {
       path: { type: "string" },
       grid: { type: "array", items: { type: "array", items: { type: "object", properties: { x: { type: "number" } } } } },
@@ -262,26 +253,11 @@ test("required list is preserved for a round-tripped field (array<array<object>>
     required: ["path", "grid"],
   });
   assert.deepStrictEqual(schema.required.sort(), ["grid", "path"]);
-  assert.strictEqual(schema.properties.grid.type, "string"); // still round-tripped
-});
-
-test("round-trip prose demands a QUOTED JSON string (Beta 4 rejects raw JSON in a string slot)", () => {
-  // Beta 4's parser deterministically 500s ("Failed to parse generated content")
-  // when the model emits raw JSON where the schema says string — which the old
-  // "JSON string matching: {...}" prose reliably provoked. The reworded prose
-  // ("must be a quoted JSON string, not raw JSON") got the model to emit a real
-  // quoted string 4/4 in live trials. Pin the load-bearing phrase.
-  const { schema } = fixToolSchema({
-    properties: {
-      grid: { type: "array", items: { type: "array", items: { type: "object", properties: { x: { type: "number" } } } } },
-    },
-  });
-  assert.match(schema.properties.grid.description, /must be a quoted JSON string, not raw JSON/);
-  assert.match(schema.properties.grid.description, /matching: \{/);
+  assert.strictEqual(schema.properties.grid.type, "array"); // native, not round-tripped
 });
 
 test("required list is preserved through native nested passthrough (object and array<object>)", () => {
-  const { schema } = fixToolSchema({
+  const schema = fixToolSchema({
     properties: {
       path: { type: "string" },
       edits: {
@@ -297,42 +273,11 @@ test("required list is preserved through native nested passthrough (object and a
 });
 
 test("required filters out names that no longer exist", () => {
-  const { schema } = fixToolSchema({
+  const schema = fixToolSchema({
     properties: { a: { type: "string" } },
     required: ["a", "ghost"],
   });
   assert.deepStrictEqual(schema.required, ["a"]);
-});
-
-test("coercion roundtrip: JSON-string args re-expand to objects (residual round-tripped shape)", () => {
-  const { coercion } = fixTools(JSON.stringify({
-    tools: [{ function: { name: "search", parameters: { properties: {
-      grid: { type: "array", items: { type: "array", items: { type: "object", properties: { x: { type: "number" } } } } },
-    } } } }],
-  }));
-  assert.deepStrictEqual(coercion.search, ["grid"]);
-  const out = expandToolCallArguments("search", JSON.stringify({ grid: '[[{"x":1}]]' }), coercion);
-  assert.deepStrictEqual(JSON.parse(out), { grid: [[{ x: 1 }]] });
-});
-
-test("coercion roundtrip: HTML-entity-mangled JSON string is decoded then expanded (Beta 4 model quirk)", () => {
-  // Seen live on Beta 4: the model emits &quot; (and friends) inside the
-  // round-tripped JSON string instead of escaped quotes. A plain JSON.parse
-  // fails; a one-shot entity decode recovers the real nested value.
-  const { coercion } = fixTools(JSON.stringify({
-    tools: [{ function: { name: "search", parameters: { properties: {
-      grid: { type: "array", items: { type: "array", items: { type: "object", properties: { x: { type: "number" } } } } },
-    } } } }],
-  }));
-  const out = expandToolCallArguments("search", JSON.stringify({ grid: "[[{&quot;x&quot;:1}]]" }), coercion);
-  assert.deepStrictEqual(JSON.parse(out), { grid: [[{ x: 1 }]] });
-});
-
-test("native nested object param needs no coercion (not in the coercion map)", () => {
-  const { coercion } = fixTools(JSON.stringify({
-    tools: [{ function: { name: "search", parameters: { properties: { filter: { type: "object", properties: { q: { type: "string" } } } } } } }],
-  }));
-  assert.strictEqual(coercion.search, undefined);
 });
 
 // ── function.description backfill ──────────────────────────────────────────
@@ -700,7 +645,7 @@ function request(port, opts, payload) {
 // Start a mock fm serve + the real proxy. `upstreamPort = 0` means "point the
 // proxy at a dead port" so its socket error path (502) fires. `handler` receives
 // (mockReq, parsedBody, mockRes) for tests that need to inspect what arrived.
-async function startStack({ handler, deadUpstream = false } = {}) {
+async function startStack({ handler, deadUpstream = false, maxRetries = 0 } = {}) {
   const proxyPort = await freePort();
   let upstream = null;
   let lastBody = null;
@@ -730,7 +675,7 @@ async function startStack({ handler, deadUpstream = false } = {}) {
 
   const child = spawn(process.execPath, [path.join(__dirname, "fm-proxy.js")], {
     env: { ...process.env, FM_PORT: String(upstreamPort), PROXY_PORT: String(proxyPort),
-           FM_MAX_RETRIES: "0", GAUGE_MODE: "msgs" },
+           FM_MAX_RETRIES: String(maxRetries), FM_RETRY_BASE_MS: "10", GAUGE_MODE: "msgs" },
     stdio: ["ignore", "pipe", "pipe"],
   });
   let stderr = "";
@@ -970,10 +915,10 @@ test("classifyError: LanguageModelError -1 is a retryable rate-limit", () => {
 });
 
 // tool_choice:"required" (or forcing a specific function) crashes fm serve's `system`
-// engine with the IDENTICAL LanguageModelError -1 signature used for PCC rate-limiting
+// engine with the IDENTICAL LanguageModelError -1 signature used for rate-limiting
 // (verified live — see memory beta3-tool-choice-required-crash / beta3-audit-remaining-
 // tests). It's a deterministic, permanent client-request-shape bug, not transient, and
-// `pcc` handles forced tool_choice fine — so classifyError must check the original
+// so classifyError must check the original
 // request (model + tool_choice) to avoid retry-looping a permanent bug for ~19.5s
 // before mislabeling it as rate_limit_exceeded.
 
@@ -1018,20 +963,6 @@ test("classifyError: 'Failed to parse generated content' (new in Beta 4) is dete
   assert.strictEqual(c.type, "server_error");
   assert.strictEqual(c.code, "generation_parse_failed");
   assert.strictEqual(c.retry, false);
-});
-
-test("classifyError: PCC 'not available in this context' is terminal service_unavailable", () => {
-  // The ModelManagerError 1013 / HTTP 503 body fm serve returns when PCC attribution
-  // is missing (e.g. fm serve spawned under node). Deterministic — must NOT retry.
-  const c = classifyError("Model 'pcc' is unavailable: PCC inference is not available in this context.");
-  assert.strictEqual(c.type, "service_unavailable");
-  assert.strictEqual(c.code, "model_unavailable");
-  assert.strictEqual(c.retry, false);
-});
-
-test("classifyError: bare service_unavailable type is also terminal", () => {
-  assert.strictEqual(classifyError("service_unavailable").retry, false);
-  assert.strictEqual(classifyError("service_unavailable").type, "service_unavailable");
 });
 
 test("classifyError: plain 'rate limit' phrase also classifies as rate-limit", () => {
@@ -1108,14 +1039,14 @@ test("safety-guardrail abort ends as finish_reason:content_filter with partial k
   const stack = await startStack({
     handler: (req, parsed, res) => {
       res.writeHead(200, { "content-type": "text/event-stream" });
-      res.write('data: {"id":"x","model":"pcc","choices":[{"index":0,"delta":{"content":"partial"}}]}\n\n');
+      res.write('data: {"id":"x","model":"system","choices":[{"index":0,"delta":{"content":"partial"}}]}\n\n');
       res.write("data: " + JSON.stringify({ error: { code: "500", message: "The model's safety guardrails were triggered.", type: "server_error" } }) + "\n\n");
       res.write("data: [DONE]\n\n");
       res.end();
     },
   });
   try {
-    const payload = JSON.stringify({ model: "pcc", stream: true, messages: [{ role: "user", content: "x" }] });
+    const payload = JSON.stringify({ model: "system", stream: true, messages: [{ role: "user", content: "x" }] });
     const res = await request(stack.proxyPort,
       { method: "POST", path: "/v1/chat/completions", headers: { "content-type": "application/json" } },
       payload);
@@ -1140,7 +1071,7 @@ test("safety-guardrail abort BEFORE any content still ends as content_filter (em
     },
   });
   try {
-    const payload = JSON.stringify({ model: "pcc", stream: true, messages: [{ role: "user", content: "x" }] });
+    const payload = JSON.stringify({ model: "system", stream: true, messages: [{ role: "user", content: "x" }] });
     const res = await request(stack.proxyPort,
       { method: "POST", path: "/v1/chat/completions", headers: { "content-type": "application/json" } },
       payload);
@@ -1159,7 +1090,7 @@ test("non-streaming guardrail returns a content_filter completion (200, no error
     },
   });
   try {
-    const payload = JSON.stringify({ model: "pcc", stream: false, messages: [{ role: "user", content: "x" }] });
+    const payload = JSON.stringify({ model: "system", stream: false, messages: [{ role: "user", content: "x" }] });
     const res = await request(stack.proxyPort,
       { method: "POST", path: "/v1/chat/completions", headers: { "content-type": "application/json" } },
       payload);
@@ -1172,7 +1103,7 @@ test("non-streaming guardrail returns a content_filter completion (200, no error
 });
 
 test("rate-limit error frame (pre-commit) is surfaced as rate_limit_exceeded", async () => {
-  // Mock fm serve emits the PCC rate-limit signature: an error frame before any content.
+  // Mock fm serve emits the rate-limit signature: an error frame before any content.
   const stack = await startStack({
     handler: (req, parsed, res) => {
       res.writeHead(200, { "content-type": "text/event-stream" });
@@ -1182,7 +1113,7 @@ test("rate-limit error frame (pre-commit) is surfaced as rate_limit_exceeded", a
     },
   });
   try {
-    const payload = JSON.stringify({ model: "pcc", stream: true, messages: [{ role: "user", content: "x" }] });
+    const payload = JSON.stringify({ model: "system", stream: true, messages: [{ role: "user", content: "x" }] });
     const res = await request(stack.proxyPort,
       { method: "POST", path: "/v1/chat/completions", headers: { "content-type": "application/json" } },
       payload);
@@ -1236,7 +1167,7 @@ test("an upstream HTTP 400 (unknown model) is surfaced as invalid_request_error 
     },
   });
   try {
-    const payload = JSON.stringify({ model: "pcc", stream: false, messages: [{ role: "user", content: "hi" }] });
+    const payload = JSON.stringify({ model: "system", stream: false, messages: [{ role: "user", content: "hi" }] });
     const t0 = Date.now();
     const res = await request(stack.proxyPort,
       { method: "POST", path: "/v1/chat/completions", headers: { "content-type": "application/json" } },
@@ -1262,13 +1193,13 @@ test("an upstream 400 on a STREAMING request is also terminal invalid_request_er
     },
   });
   try {
-    const payload = JSON.stringify({ model: "pcc", stream: true, messages: [{ role: "user", content: "hi" }] });
+    const payload = JSON.stringify({ model: "system", stream: true, messages: [{ role: "user", content: "hi" }] });
     const res = await request(stack.proxyPort,
       { method: "POST", path: "/v1/chat/completions", headers: { "content-type": "application/json" } },
       payload);
     assert.ok(res.body.includes('"type":"invalid_request_error"'), `body=${res.body}`);
     assert.ok(!/"type":"server_error"/.test(res.body), `body=${res.body}`);
-    assert.ok(!/likely PCC rate limit/.test(res.body), `body=${res.body}`);
+    assert.ok(!/returned no output after retries/.test(res.body), `body=${res.body}`);
   } finally { await stack.stop(); }
 });
 
@@ -1391,33 +1322,6 @@ test("an explicit stream:true is forwarded unchanged, not pinned to false", asyn
   } finally { await stack.stop(); }
 });
 
-test("PCC-unavailable 503 (bare-JSON body, no SSE framing) is typed service_unavailable, not retried as rate-limit", async () => {
-  // Reproduces the live failure: fm serve returns HTTP 503 with a BARE-JSON error body
-  // (NOT a `data:`-framed SSE frame) when `pcc` lacks attribution. The proxy must
-  // classify it and surface a typed service_unavailable, not treat it as an empty
-  // stream and emit the generic "no output (likely PCC rate limit)" message.
-  const stack = await startStack({
-    handler: (req, parsed, res) => {
-      res.writeHead(503, { "content-type": "application/json" });
-      res.end(JSON.stringify({
-        error: { type: "service_unavailable", code: "503",
-          message: "Model 'pcc' is unavailable: PCC inference is not available in this context." },
-      }));
-    },
-  });
-  try {
-    const payload = JSON.stringify({ model: "pcc", stream: true, messages: [{ role: "user", content: "x" }] });
-    const res = await request(stack.proxyPort,
-      { method: "POST", path: "/v1/chat/completions", headers: { "content-type": "application/json" } },
-      payload);
-    assert.ok(res.body.includes('"type":"service_unavailable"'), `body=${res.body}`);
-    assert.ok(res.body.includes('"code":"model_unavailable"'), `body=${res.body}`);
-    // Regression guard: the old generic "no output / rate limit" frame must NOT appear.
-    assert.ok(!/likely PCC rate limit/.test(res.body), `body=${res.body}`);
-    assert.ok(!/"type":"rate_limit_exceeded"/.test(res.body), `body=${res.body}`);
-  } finally { await stack.stop(); }
-});
-
 // ── tok/s counter ─────────────────────────────────────────────────────────────
 // Every chat completion logs a one-line `[toks]` throughput counter to stderr.
 // It is NOT gated behind --verbose (unlike `[assembled] req`), so it shows up in
@@ -1430,21 +1334,21 @@ test("tok/s: streaming completion logs [toks] stream with ttft", async () => {
   const stack = await startStack({
     handler: (req, parsed, res) => {
       res.writeHead(200, { "content-type": "text/event-stream" });
-      res.write('data: {"id":"x","model":"pcc","choices":[{"index":0,"delta":{"content":"hello world"}}]}\n\n');
-      res.write('data: {"id":"x","model":"pcc","choices":[{"index":0,"finish_reason":"stop"}]}\n\n');
+      res.write('data: {"id":"x","model":"system","choices":[{"index":0,"delta":{"content":"hello world"}}]}\n\n');
+      res.write('data: {"id":"x","model":"system","choices":[{"index":0,"finish_reason":"stop"}]}\n\n');
       res.write("data: [DONE]\n\n");
       res.end();
     },
   });
   try {
-    const payload = JSON.stringify({ model: "pcc", stream: true, messages: [{ role: "user", content: "x" }] });
+    const payload = JSON.stringify({ model: "system", stream: true, messages: [{ role: "user", content: "x" }] });
     const res = await request(stack.proxyPort,
       { method: "POST", path: "/v1/chat/completions", headers: { "content-type": "application/json" } },
       payload);
     assert.strictEqual(res.status, 200, `body=${res.body} stderr=${stack.getStderr()}`);
     const line = stack.getStderr().split("\n").find((l) => l.includes("[toks]"));
     assert.ok(line, `no [toks] line in stderr:\n${stack.getStderr()}`);
-    assert.match(line, /model=pcc/);
+    assert.match(line, /model=system/);
     assert.match(line, /\sstream\s/);
     assert.match(line, /out=\d+/);          // non-zero output tokens ("hello world")
     assert.match(line, /dur=[0-9.]+s/);
@@ -1608,9 +1512,13 @@ test("streaming: fm serve's real usage chunk is relayed verbatim, not recomputed
     assert.strictEqual(usageLines.length, 1, `expected exactly one usage chunk:\n${res.body}`);
     const chunk = JSON.parse(usageLines[0].slice(usageLines[0].indexOf("{")));
     assert.deepStrictEqual(chunk.usage, { prompt_tokens: 4242, completion_tokens: 7, total_tokens: 4249 });
-    // The raw upstream usage-only frame (choices:[]) must never leak through
-    // verbatim — only the proxy's own rebuilt final chunk carries usage.
-    assert.ok(!/"choices":\[\]/.test(res.body), `raw usage-only frame leaked through:\n${res.body}`);
+    // Exactly one usage chunk (asserted above) is what proves the raw upstream frame
+    // did not leak through beside the proxy's rebuilt one. `choices: []` is NOT a leak
+    // marker: it is the correct OpenAI shape for a usage chunk, and the proxy now emits
+    // it too rather than a fake `finish_reason: null`.
+    assert.deepStrictEqual(chunk.choices, [], `usage chunk should carry choices:[]:\n${res.body}`);
+    // The real stop must survive on its own chunk, not be overwritten by the last one.
+    assert.ok(/"finish_reason":"stop"/.test(res.body), `stop was lost:\n${res.body}`);
   } finally { await stack.stop(); }
 });
 
@@ -1648,7 +1556,7 @@ test("streaming: content_filter abort still emits its finish_reason even when th
   const stack = await startStack({
     handler: (req, parsed, res) => {
       res.writeHead(200, { "content-type": "text/event-stream" });
-      res.write('data: {"id":"x","model":"pcc","choices":[{"index":0,"delta":{"content":"partial"}}]}\n\n');
+      res.write('data: {"id":"x","model":"system","choices":[{"index":0,"delta":{"content":"partial"}}]}\n\n');
       res.write("data: " + JSON.stringify({ error: { code: "500", message: "The model's safety guardrails were triggered.", type: "server_error" } }) + "\n\n");
       res.write("data: [DONE]\n\n");
       res.end();
@@ -1656,7 +1564,7 @@ test("streaming: content_filter abort still emits its finish_reason even when th
   });
   try {
     const payload = JSON.stringify({
-      model: "pcc", stream: true, messages: [{ role: "user", content: "x" }],
+      model: "system", stream: true, messages: [{ role: "user", content: "x" }],
       stream_options: { include_usage: false },
     });
     const res = await request(stack.proxyPort,
@@ -1664,5 +1572,319 @@ test("streaming: content_filter abort still emits its finish_reason even when th
       payload);
     assert.ok(/"finish_reason":"content_filter"/.test(res.body), `body=${res.body}`);
     assert.ok(!/"usage"/.test(res.body), `usage leaked through despite explicit opt-out:\n${res.body}`);
+  } finally { await stack.stop(); }
+});
+
+// ── Cross-site headers (fm serve rejects them) ───────────────────────────────
+// fm serve answers `403 Cross-site requests are not allowed` to any request carrying
+// Origin, Referer or Sec-Fetch-Site. A browser sets those automatically, so forwarding
+// them made every real browser request fail even though the proxy attaches its own
+// CORS headers. The browser→proxy hop is what the origin describes; the proxy→fm serve
+// hop is local, so the whole family is stripped.
+test("cross-site request headers are stripped before the upstream hop", async () => {
+  let seen = null;
+  const stack = await startStack({
+    handler: (req, parsed, res) => {
+      seen = req.headers;
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify({
+        id: "x", object: "chat.completion", model: "system",
+        choices: [{ index: 0, message: { role: "assistant", content: "ok" }, finish_reason: "stop" }],
+        usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
+      }));
+    },
+  });
+  try {
+    await request(stack.proxyPort,
+      { method: "POST", path: "/v1/chat/completions", headers: {
+        "content-type": "application/json",
+        origin: "https://example.com",
+        referer: "https://example.com/app",
+        "sec-fetch-site": "cross-site",
+        "sec-fetch-mode": "cors",
+      } },
+      JSON.stringify({ model: "system", stream: false, messages: [{ role: "user", content: "hi" }] }));
+    assert.ok(seen, "upstream never saw the request");
+    assert.strictEqual(seen.origin, undefined, "Origin reached fm serve; it would 403");
+    assert.strictEqual(seen.referer, undefined, "Referer reached fm serve; it would 403");
+    assert.strictEqual(seen["sec-fetch-site"], undefined, "Sec-Fetch-Site reached fm serve; it would 403");
+    assert.strictEqual(seen["sec-fetch-mode"], undefined, "Sec-Fetch-* should be stripped as a family");
+    // The client still gets CORS headers back from the proxy itself.
+    assert.strictEqual(seen["content-type"], "application/json", "ordinary headers must survive");
+  } finally { await stack.stop(); }
+});
+
+test("a browser-shaped request still returns CORS headers to the client", async () => {
+  const stack = await startStack();
+  try {
+    const res = await request(stack.proxyPort,
+      { method: "POST", path: "/v1/chat/completions", headers: {
+        "content-type": "application/json", origin: "https://example.com" } },
+      JSON.stringify({ model: "system", stream: false, messages: [{ role: "user", content: "hi" }] }));
+    assert.strictEqual(res.status, 200, `body=${res.body}`);
+    assert.strictEqual(res.headers["access-control-allow-origin"], "*");
+  } finally { await stack.stop(); }
+});
+
+// ── Context overflow is terminal ─────────────────────────────────────────────
+// A prompt larger than the model's window fails identically every time: the request is
+// fixed, so a retry re-sends the same oversized transcript. The on-device window is
+// 4096 tokens and agent harnesses overshoot it easily (pi's own framing assembles to
+// ~8.4k before a single tool), so this is the failure a client meets most often.
+// It used to fall through to the retryable generic branch and cost the full
+// 1+2+4+8s ladder — five upstream attempts — before surfacing.
+test("classifyError: a context overflow is terminal, not a retryable server_error", () => {
+  const c = classifyError("The session's transcript exceeded the model's context size.");
+  assert.strictEqual(c.type, "invalid_request_error");
+  assert.strictEqual(c.code, "context_length_exceeded");
+  assert.strictEqual(c.retry, false);
+});
+
+test("classifyError: context overflow stays terminal on a 500 (fm serve types it server_error)", () => {
+  const c = classifyError("The session's transcript exceeded the model's context size.", 500);
+  assert.strictEqual(c.code, "context_length_exceeded");
+  assert.strictEqual(c.retry, false);
+});
+
+test("a context overflow hits upstream exactly once, even with retries enabled", async () => {
+  let hits = 0;
+  const stack = await startStack({
+    maxRetries: 4,
+    handler: (req, parsed, res) => {
+      hits++;
+      res.writeHead(200, { "content-type": "text/event-stream" });
+      res.write('data: {"error":{"type":"server_error","code":"500","message":"The session\'s transcript exceeded the model\'s context size."}}\n\n');
+      res.end();
+    },
+  });
+  try {
+    const res = await request(stack.proxyPort,
+      { method: "POST", path: "/v1/chat/completions", headers: { "content-type": "application/json" } },
+      JSON.stringify({ model: "system", stream: true, messages: [{ role: "user", content: "hi" }] }));
+    assert.strictEqual(hits, 1, `retried a permanent overflow ${hits} times`);
+    assert.ok(res.body.includes('"context_length_exceeded"'), `body=${res.body}`);
+  } finally { await stack.stop(); }
+});
+
+test("non-streaming context overflow is typed and not retried", async () => {
+  let hits = 0;
+  const stack = await startStack({
+    maxRetries: 4,
+    handler: (req, parsed, res) => {
+      hits++;
+      res.writeHead(500, { "content-type": "application/json" });
+      res.end(JSON.stringify({
+        error: { type: "server_error", code: "500", message: "The session's transcript exceeded the model's context size." },
+      }));
+    },
+  });
+  try {
+    const res = await request(stack.proxyPort,
+      { method: "POST", path: "/v1/chat/completions", headers: { "content-type": "application/json" } },
+      JSON.stringify({ model: "system", stream: false, messages: [{ role: "user", content: "hi" }] }));
+    assert.strictEqual(hits, 1, `retried a permanent overflow ${hits} times`);
+    assert.ok(res.body.includes('"context_length_exceeded"'), `body=${res.body}`);
+  } finally { await stack.stop(); }
+});
+
+// ── The usage chunk must not fake a finish_reason ────────────────────────────
+// OpenAI's usage chunk (stream_options.include_usage) carries `choices: []`, and so
+// does fm serve's. The proxy re-emits its own final chunk to attach real usage, and it
+// used to build `choices: [{delta:{}, finish_reason: abortFinishReason}]` — which is
+// `null` for an ordinary completion. Clients that read the LAST chunk's finish_reason
+// therefore saw null after a perfectly good "stop", and reported the reply as cut off.
+// Pi shows "Response was truncated before completion." Only attach a choices entry when
+// there is a real finish_reason to carry (a guardrail abort, or a length cap).
+test("streaming: the usage chunk carries choices:[] and never a null finish_reason", async () => {
+  const stack = await startStack({
+    handler: (req, parsed, res) => {
+      res.writeHead(200, { "content-type": "text/event-stream" });
+      res.write('data: {"id":"x","object":"chat.completion.chunk","model":"system","choices":[{"index":0,"delta":{"content":"Hi"}}]}\n\n');
+      res.write('data: {"id":"x","object":"chat.completion.chunk","model":"system","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}\n\n');
+      res.write('data: {"id":"x","object":"chat.completion.chunk","model":"system","choices":[],"usage":{"prompt_tokens":5,"completion_tokens":2,"total_tokens":7}}\n\n');
+      res.write("data: [DONE]\n\n");
+      res.end();
+    },
+  });
+  try {
+    const res = await request(stack.proxyPort,
+      { method: "POST", path: "/v1/chat/completions", headers: { "content-type": "application/json" } },
+      JSON.stringify({ model: "system", stream: true, messages: [{ role: "user", content: "hi" }] }));
+    const chunks = res.body.split("\n").map((l) => l.trim())
+      .filter((l) => l.startsWith("data:") && !l.includes("[DONE]"))
+      .map((l) => JSON.parse(l.slice(5).trim()));
+    const usageChunk = chunks.find((c) => c.usage);
+    assert.ok(usageChunk, "no usage chunk emitted");
+    assert.deepStrictEqual(usageChunk.choices, [], "usage chunk must carry choices:[]");
+    const nulls = chunks.filter((c) => (c.choices || []).some((ch) => ch.finish_reason === null));
+    assert.strictEqual(nulls.length, 0, `a chunk carried finish_reason:null — clients read that as truncation`);
+    const stops = chunks.filter((c) => (c.choices || []).some((ch) => ch.finish_reason === "stop"));
+    assert.strictEqual(stops.length, 1, "the real stop must survive exactly once");
+  } finally { await stack.stop(); }
+});
+
+test("streaming: a length cap still carries finish_reason on the usage chunk", async () => {
+  const stack = await startStack({
+    handler: (req, parsed, res) => {
+      res.writeHead(200, { "content-type": "text/event-stream" });
+      res.write('data: {"id":"x","object":"chat.completion.chunk","model":"system","choices":[{"index":0,"delta":{"content":"1, 2, 3"}}]}\n\n');
+      res.write('data: {"id":"x","object":"chat.completion.chunk","model":"system","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}\n\n');
+      res.write('data: {"id":"x","object":"chat.completion.chunk","model":"system","choices":[],"usage":{"prompt_tokens":5,"completion_tokens":10,"total_tokens":15}}\n\n');
+      res.write("data: [DONE]\n\n");
+      res.end();
+    },
+  });
+  try {
+    const res = await request(stack.proxyPort,
+      { method: "POST", path: "/v1/chat/completions", headers: { "content-type": "application/json" } },
+      JSON.stringify({ model: "system", stream: true, max_tokens: 10, messages: [{ role: "user", content: "count" }] }));
+    assert.ok(/"finish_reason":"length"/.test(res.body), `no length label:\n${res.body}`);
+  } finally { await stack.stop(); }
+});
+
+// ── A capped stream must carry exactly one finish_reason ────────────────────
+// The cap logic used to APPEND a finish_reason: upstream sent "stop" on its own chunk,
+// then the trailing usage chunk added "length". One stream carried two values, and a
+// client that reads the last one reported a complete answer as truncated. pi rendered
+// nothing at all. Upstream's chunk now relays with the reason stripped, and the trailing
+// chunk is the single source. The non-streaming path always rewrote in place.
+const countFinishReasons = (body) => (body.match(/"finish_reason":"[a-z_]+"/g) || []).length;
+
+const cappedStack = (completionTokens) => startStack({
+  handler: (req, parsed, res) => {
+    res.writeHead(200, { "content-type": "text/event-stream" });
+    res.write('data: {"id":"x","object":"chat.completion.chunk","model":"system","choices":[{"index":0,"delta":{"content":"1, 2, 3"}}]}\n\n');
+    res.write('data: {"id":"x","object":"chat.completion.chunk","model":"system","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}\n\n');
+    res.write(`data: {"id":"x","object":"chat.completion.chunk","model":"system","choices":[],"usage":{"prompt_tokens":5,"completion_tokens":${completionTokens},"total_tokens":${5 + completionTokens}}}\n\n`);
+    res.write("data: [DONE]\n\n");
+    res.end();
+  },
+});
+
+const capReq = (port, body) => request(port,
+  { method: "POST", path: "/v1/chat/completions", headers: { "content-type": "application/json" } },
+  JSON.stringify({ model: "system", stream: true, messages: [{ role: "user", content: "count" }], ...body }));
+
+test("streaming: a cap AT the completion length emits one finish_reason, not two", async () => {
+  const stack = await cappedStack(10);
+  try {
+    const res = await capReq(stack.proxyPort, { max_tokens: 10 });
+    assert.strictEqual(countFinishReasons(res.body), 1, `expected one finish_reason:\n${res.body}`);
+    assert.ok(/"finish_reason":"length"/.test(res.body), `no length label:\n${res.body}`);
+  } finally { await stack.stop(); }
+});
+
+test("streaming: a cap BELOW the completion length emits one finish_reason", async () => {
+  const stack = await cappedStack(10);
+  try {
+    const res = await capReq(stack.proxyPort, { max_completion_tokens: 1 });
+    assert.strictEqual(countFinishReasons(res.body), 1, `expected one finish_reason:\n${res.body}`);
+    assert.ok(/"finish_reason":"length"/.test(res.body), `no length label:\n${res.body}`);
+  } finally { await stack.stop(); }
+});
+
+test("streaming: a cap ABOVE the completion length keeps the real stop, once", async () => {
+  const stack = await cappedStack(3);
+  try {
+    const res = await capReq(stack.proxyPort, { max_tokens: 500 });
+    assert.strictEqual(countFinishReasons(res.body), 1, `expected one finish_reason:\n${res.body}`);
+    assert.ok(/"finish_reason":"stop"/.test(res.body), `stop was lost:\n${res.body}`);
+    assert.ok(!/"finish_reason":"length"/.test(res.body), `mislabelled as length:\n${res.body}`);
+  } finally { await stack.stop(); }
+});
+
+test("streaming: an uncapped request is untouched and still carries one stop", async () => {
+  const stack = await cappedStack(3);
+  try {
+    const res = await capReq(stack.proxyPort, {});
+    assert.strictEqual(countFinishReasons(res.body), 1, `expected one finish_reason:\n${res.body}`);
+    assert.ok(/"finish_reason":"stop"/.test(res.body), `stop was lost:\n${res.body}`);
+  } finally { await stack.stop(); }
+});
+
+test("streaming: a cap with include_usage:false still emits exactly one finish_reason", async () => {
+  const stack = await cappedStack(10);
+  try {
+    const res = await capReq(stack.proxyPort, { max_tokens: 10, stream_options: { include_usage: false } });
+    assert.strictEqual(countFinishReasons(res.body), 1, `expected one finish_reason:\n${res.body}`);
+    assert.ok(/"finish_reason":"length"/.test(res.body), `no length label:\n${res.body}`);
+  } finally { await stack.stop(); }
+});
+
+test("streaming: a capped chunk carrying both content and finish_reason survives $ in the text", async () => {
+  // Two gaps in one: the rewrite path had never been exercised with a NON-empty delta,
+  // and String.replace with a string replacement expands $&, $`, $' and $n out of the
+  // completion text. That turned the relayed frame into unparseable JSON. fm serve puts
+  // finish_reason on a bare {delta:{}} chunk so it cannot trigger this, but any upstream
+  // that bundles the last content with finish_reason can.
+  const TEXT = "it costs $& more, $` and $' and $1 too";
+  const stack = await startStack({
+    handler: (req, parsed, res) => {
+      res.writeHead(200, { "content-type": "text/event-stream" });
+      res.write(`data: ${JSON.stringify({ id: "x", object: "chat.completion.chunk", model: "system",
+        choices: [{ index: 0, delta: { content: TEXT }, finish_reason: "stop" }] })}\n\n`);
+      res.write('data: {"id":"x","object":"chat.completion.chunk","model":"system","choices":[],"usage":{"prompt_tokens":5,"completion_tokens":3,"total_tokens":8}}\n\n');
+      res.write("data: [DONE]\n\n");
+      res.end();
+    },
+  });
+  try {
+    const res = await request(stack.proxyPort,
+      { method: "POST", path: "/v1/chat/completions", headers: { "content-type": "application/json" } },
+      JSON.stringify({ model: "system", stream: true, max_tokens: 500, messages: [{ role: "user", content: "hi" }] }));
+    // Every data frame must still parse, and the text must round-trip byte for byte.
+    let seen = "";
+    for (const line of res.body.split("\n")) {
+      if (!line.startsWith("data: ") || line.includes("[DONE]")) continue;
+      const obj = JSON.parse(line.slice(6)); // throws if the replacement corrupted it
+      seen += (obj.choices && obj.choices[0] && obj.choices[0].delta && obj.choices[0].delta.content) || "";
+    }
+    assert.strictEqual(seen, TEXT, `completion text was mangled:\n${res.body}`);
+    assert.strictEqual(countFinishReasons(res.body), 1, `expected one finish_reason:\n${res.body}`);
+  } finally { await stack.stop(); }
+});
+
+// ── Overflow message must be recognisable to clients ─────────────────────────
+// Clients auto-recover from a context overflow (compact-and-retry) by matching the
+// error TEXT, not the code — Pi's patterns are "context length exceeded", "exceeds the
+// context window", "too many tokens", "token limit exceeded". fm serve says "The
+// session's transcript exceeded the model's context size", which matches none of them,
+// so a client that could have compacted and retried instead just gave up. Surface a
+// message carrying the canonical phrase, keeping fm serve's own wording for diagnosis.
+const OVERFLOW_UP = "The session's transcript exceeded the model's context size.";
+
+test("non-streaming overflow surfaces a message clients can match on", async () => {
+  const stack = await startStack({
+    handler: (req, parsed, res) => {
+      res.writeHead(500, { "content-type": "application/json" });
+      res.end(JSON.stringify({ error: { type: "server_error", code: "500", message: OVERFLOW_UP } }));
+    },
+  });
+  try {
+    const res = await request(stack.proxyPort,
+      { method: "POST", path: "/v1/chat/completions", headers: { "content-type": "application/json" } },
+      JSON.stringify({ model: "system", stream: false, messages: [{ role: "user", content: "hi" }] }));
+    const body = JSON.parse(res.body);
+    assert.strictEqual(body.error.code, "context_length_exceeded");
+    assert.match(body.error.message, /context length exceeded/i);
+    // fm serve's own sentence is kept so the upstream cause stays greppable.
+    assert.match(body.error.message, /transcript exceeded the model's context size/);
+  } finally { await stack.stop(); }
+});
+
+test("streaming overflow surfaces the same matchable message", async () => {
+  const stack = await startStack({
+    handler: (req, parsed, res) => {
+      res.writeHead(200, { "content-type": "text/event-stream" });
+      res.write(`data: ${JSON.stringify({ error: { type: "server_error", code: "500", message: OVERFLOW_UP } })}\n\n`);
+      res.end();
+    },
+  });
+  try {
+    const res = await request(stack.proxyPort,
+      { method: "POST", path: "/v1/chat/completions", headers: { "content-type": "application/json" } },
+      JSON.stringify({ model: "system", stream: true, messages: [{ role: "user", content: "hi" }] }));
+    assert.match(res.body, /context length exceeded/i);
+    assert.match(res.body, /"code":"context_length_exceeded"/);
   } finally { await stack.stop(); }
 });

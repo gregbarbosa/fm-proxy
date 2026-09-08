@@ -6,12 +6,14 @@
 
 ## Project direction
 
-The **`fm-proxy.js`** path is the primary, supported way to do tool calling + PCC with
-Pi/Opencode (see runbook below). It sits in front of Apple's entitled `fm serve` and
-speaks the OpenAI Chat Completions dialect. (An earlier in-process Swift `fms` app was
-explored but removed: it could not do PCC because of the Apple-private entitlement
-`com.apple.modelmanager.inference`, grantable only to Apple-signed binaries. As these
-are early betas, Apple may lift the entitlement gate — worth rechecking periodically.)
+**`fm-proxy.js`** sits in front of Apple's `fm serve` and speaks the OpenAI Chat
+Completions dialect, so an ordinary OpenAI client works against the on-device model
+without code changes. It supports **Beta 7 only**; code for earlier betas is removed.
+
+An earlier in-process Swift `fms` app was explored and dropped: it could not run
+inference on Private Cloud Compute, which needed the Apple-private entitlement
+`com.apple.modelmanager.inference`. That question is now moot — Beta 7 removes PCC from
+the `fm` binary altogether.
 
 ## `fm` CLI reference
 
@@ -32,187 +34,73 @@ version is on disk, so regenerate rather than hand-editing.
 `fm --version` does **not** exist (errors "Unknown option"). To detect when Apple ships a
 new `fm`/FoundationModels build across macOS betas, fingerprint the binary:
 
-| What | How | Beta 2 value | Beta 3 value | Beta 4 value | Beta 5 value | Beta 6 value | Beta 7 value |
-|---|---|---|---|---|---|---|---|
-| fm source version | `otool -l /usr/bin/fm \| grep -A2 LC_SOURCE_VERSION` | `2.0.55.1.402` | `2.0.59` | `2.0.62.1.402` | `2.0.68.1.401` | `2.0.68.1.401` | `2.0.68.1.402` |
-| Framework version | `plutil -p /System/Library/Frameworks/FoundationModels.framework/Resources/Info.plist \| grep CFBundleVersion` | `2.0.55.1.402` | `2.0.59` | `2.0.62.1.402` | `2.0.68.1.401` | `2.0.68.1.401` | `2.0.68.1.402` |
-| Runtime version | `codesign -dvvv /usr/bin/fm` → `Runtime Version=` | `27.0.0` | `27.0.0` | `27.0.0` | `27.0.0` | `27.0.0` | `27.0.0` |
-| Rebuild date | `ls -la /usr/bin/fm` (mtime) | Jun 19 2026 | Jul 3 2026 | Jul 17 2026 | Aug 7 2026 | Aug 14 2026 | Aug 21 2026 |
-| macOS build | `sw_vers` → `BuildVersion` | `26A5368g` (27.0 Beta 2) | `26A5378j` (27.0 Beta 3) | `26A5388g` (27.0 Beta 4) | `26A5406e` (27.0 Beta 5) | `26A5416b` (27.0 Beta 6) | `26A5421a` (27.0 Beta 7) |
+| What | How | Beta 2 value | Beta 3 value | Beta 4 value | Beta 5 value | Beta 6 value | Beta 7 value | Beta 8 value |
+|---|---|---|---|---|---|---|---|---|
+| fm source version | `otool -l /usr/bin/fm \| grep -A2 LC_SOURCE_VERSION` | `2.0.55.1.402` | `2.0.59` | `2.0.62.1.402` | `2.0.68.1.401` | `2.0.68.1.401` | `2.0.68.1.402` | `2.0.68.1.402` |
+| Framework version | `plutil -p /System/Library/Frameworks/FoundationModels.framework/Resources/Info.plist \| grep CFBundleVersion` | `2.0.55.1.402` | `2.0.59` | `2.0.62.1.402` | `2.0.68.1.401` | `2.0.68.1.401` | `2.0.68.1.402` | `2.0.68.1.402` |
+| Runtime version | `codesign -dvvv /usr/bin/fm` → `Runtime Version=` | `27.0.0` | `27.0.0` | `27.0.0` | `27.0.0` | `27.0.0` | `27.0.0` | `27.0.0` |
+| Rebuild date | `ls -la /usr/bin/fm` (mtime) | Jun 19 2026 | Jul 3 2026 | Jul 17 2026 | Aug 7 2026 | Aug 14 2026 | Aug 21 2026 | Aug 27 2026 |
+| macOS build | `sw_vers` → `BuildVersion` | `26A5368g` (27.0 Beta 2) | `26A5378j` (27.0 Beta 3) | `26A5388g` (27.0 Beta 4) | `26A5406e` (27.0 Beta 5) | `26A5416b` (27.0 Beta 6) | `26A5421a` (27.0 Beta 7) | `26A5425a` (27.0 Beta 8) |
 
 Audit recipe after any OS update:
-1. **Structure** — `python3 tools/gen-fm-docs.py --outdir /tmp/fmnew` then
-   `diff docs/fm-reference.md /tmp/fmnew/fm-reference.md`. (Beta 2: byte-identical to Beta 1.
-   Beta 3: **changed** — "JSON schema" wording → "structured output schema" throughout, and
-   `fm schema object --help`'s USAGE examples now show a `--nested <name>` flag. That flag
-   does **not** actually exist (`Unknown argument: --nested`); the OPTIONS list still
-   documents the real, working flag `--object <name>`. Treat this as a bug in Apple's help
-   text, not a rename — keep using `--object`.)
-2. **Behavior** — the help tree can stay identical while behavior changes (or vice versa,
-   per Beta 3), so re-test the known walls separately:
-   - nested-schema `duplicateType` — **FIXED in Beta 3**, for both `response_format`
-     (verified via `fm respond --schema` and `response_format` json_schema over
-     `/v1/chat/completions`, using a real `$defs`/`$ref` nested schema) and **tool
-     parameters** (verified directly: nested object, array<object>, object-in-object,
-     object → array → object all decode correctly through `tools`/`tool_calls`). Was
-     broken Beta 1–2. Two shapes remain broken on the tool-parameter path even in
-     Beta 3 — see "Nested params" below.
-   - `response_format` `required`-array / `title`+`x-order` dialect — still enforced, but
-     narrower than originally thought: only for object schemas reached through `$defs`,
-     not "every object level" (flat and inline-nested schemas need none of it — see
-     "Structured output" below). `fm-proxy.js` now injects the dialect into `$defs`
-     automatically. Tool parameters, by contrast, need **no** title/x-order dialect at all.
-   - non-streaming `usage.prompt_tokens` — **FIXED in Beta 3.** Verified live against
-     `fm token-count`: values now match exactly (was hardcoded `0`). Streaming still
-     sends no `usage` at all — unchanged, still needs the proxy's fill-in.
-   - on-device `system` model actually running inference — healthy again in Beta 3 (Beta 2
-     was flaky right after update — see Known limits).
 
-Beta 4 (26A5388g, fm 2.0.62.1.402) audit results, 2026-07-21:
-- **`fm token-count` renamed `fm count-tokens`** — the old name hard-errors
-  (`Unknown command`). `fm-proxy.js`'s `fmTokenCount` probes `count-tokens` first and
-  falls back to `token-count` (Beta 3 compat), remembering whichever works.
-- `--load-transcript` renamed `--resume`; new repeatable `--tool` flag on
-  `respond`/`count-tokens` enabling built-in `barcode` and `ocr` tools, with `--label`
-  to name `--image` inputs.
-- **PCC attribution tightened: Terminal.app specifically, not just any foreground TTY**
-  (see the runbook note below). Foreground panes in other terminal hosts (herdr) that
-  worked on Beta 3 are now refused; the error says "Please use the Terminal app." Also
-  refused: a plain foreground **Ghostty** tab (not herdr, no daemon in the tree) —
-  user-tested 2026-07-23. That rules out a process-detachment explanation; it's the
-  host app's identity, and only Terminal.app passes. Only Terminal.app was confirmed
-  to grant it (via `osascript … do script`).
-- **3+-chained-object tool params FIXED** (was a `$defs`-leak, round-tripped since
-  Beta 3) — verified 5/5 on `system` + `pcc`, incl. a 4-level chain. The round-trip now
-  triggers ONLY for `array<array<object>>`.
-- **`array<array<object>>` failure mode changed**: native now hard-errors
-  `500 "Failed to parse generated content."` (Beta 3 silently omitted the argument).
-  The old round-trip prose ("JSON string matching:") deterministically provoked the
-  SAME 500 (model emits raw JSON in the string slot; Beta 4's parser rejects it) — the
-  prose now demands "a quoted JSON string, not raw JSON", which is mechanically
-  reliable (4/4) though content quality for this shape remains a model limitation
-  (e.g. HTML-entity-mangled quotes, which `expandToolCallArguments` now decodes).
-- New `classifyError` branch: `"Failed to parse generated content"` is deterministic
-  (5/5) → `server_error`/`generation_parse_failed`, `retry:false` (was retrying the
-  full ~35s backoff ladder).
-- **Chat template overhead grew ~150 tokens**: the same one-line message that framed
-  to 57 `prompt_tokens` on Beta 3 frames to ~208 on Beta 4 (system and pcc alike).
-  Tokenizer itself unchanged (`count-tokens` values identical). Budget accordingly
-  against the ~32k PCC ceiling.
-- **PCC now reports real prompt caching** — `prompt_tokens_details.cached_tokens` is
-  non-zero on repeat prompts (was always 0). Pure passthrough; nothing to fix.
-- Unchanged from Beta 3 (all reverified live): `tool_choice:"required"` still crashes
-  `system` (pcc fine); missing `function.description` still 400s; `response_format`
-  `$defs` dialect still required (error now names the offending path); streaming usage
-  still requires `stream_options.include_usage:true` (proxy still forces it);
-  `parallel_tool_calls` still ignored; CORS preflight-yes/request-403 split unchanged.
+1. **Structure** — regenerate and diff the CLI tree:
+   `python3 tools/gen-fm-docs.py --outdir /tmp/fmnew` then
+   `diff docs/fm-reference.md /tmp/fmnew/fm-reference.md`.
+   The tree is a compile-time dump, so a diff here is authoritative: Beta 7's was all
+   deletions, which is how PCC's removal was caught.
+2. **Behaviour** — the help tree can stay identical while behaviour changes, and the
+   reverse also happens, so re-test the known walls separately. Run the three test
+   layers in `tools/TEST_PLAN.md`, then re-check by hand:
+   - tool calling — still broken upstream (`tool_calls` never populated)
+   - `$defs` in `response_format` — undecorated 400s; a **cyclic** one hangs `fm serve`
+     permanently, so test it last and restart the server afterwards
+   - forced `tool_choice` — 500 "unsupported generation guide"
+   - a tool with no `function.description` — 400s the whole request
+   - omitted `stream` — returns SSE, not JSON
+   - `n > 1` — 400s
+   - prompt framing — `hello world` should be 57 `prompt_tokens`
+   - the 4096-token window — a ~4056-token prompt passes, ~8056 does not
 
-## Tool calling with Pi (PCC + rich schemas) — runbook
+Record the result as a new `### Beta N` section, and fold the previous one into the
+release-history table.
 
-An in-process app cannot do PCC inference (it's gated on the Apple-private entitlement
-`com.apple.modelmanager.inference`, which fails with `ModelManagerError 1046` for any
-binary not signed by Apple). To get tool calling + PCC's 32k context working
-with Pi/Opencode, proxy through Apple's own entitled `fm serve`:
+## Running Pi against fm-proxy
+
+Pi **works** against the on-device model. What it cannot do is tool calling, and what
+kills it in practice is project context, not the harness itself.
+
+Use `pi-minimal` (an alias for `pi -ne -ns -np --no-themes`) and select the `` FM``
+provider's `system` model. Measured live on Beta 7, in a directory with no context file:
 
 ```
-Pi  ──▶  fm-proxy.js (:1977)  ──▶  Apple `fm serve` (:1976)
-         flattens tool schemas      entitled engine: system + pcc, runs tools
+[assembled] req model=system turns=1 gauge(msgs)=689 tools=499 => assembled=1188
 ```
 
-Apple's `fm serve` has some remaining JSON-Schema gaps for tool parameters (root
-`required` must be present; no `anyOf/allOf/oneOf/$ref/$defs/patternProperties`).
-`fm-proxy.js` rewrites incoming tool schemas so Pi's rich definitions are accepted.
+1188 tokens of a 4096-token window, and the request returns HTTP 200. The lean toolset
+costs only 499 tokens.
 
-**Every tool needs a non-null `function.description`, even a no-argument tool.**
-Verified live (Beta 3 / fm 2.0.59): `fm serve` 400s the **entire** request —
-`"Invalid JSON: The data couldn't be read because it is missing."` — if *any* tool
-in the array has `function.description` absent or `null`, regardless of that tool's
-`parameters` shape, `tool_choice`, or which tool the model actually ends up calling.
-An empty string (`""`) is accepted. This was originally misdiagnosed as an
-empty-`parameters.properties` bug (a no-arg tool naturally invites a minimal test
-schema that also omits `description`), but a non-empty-schema tool with no
-description hits the identical 400, and a no-arg tool *with* a description (even
-`""`) works fine — so the real trigger is the missing description key, unrelated to
-parameter shape. OpenAI's tool-calling spec makes `description` optional, so a
-compliant client can legitimately send the shape that breaks `fm serve`.
-`fm-proxy.js`'s `fixTools` backfills a missing/null `function.description` to `""`
-before forwarding, so client-supplied no-description tools (common for simple
-no-argument actions) work transparently instead of erroring.
+**The window is spent on project context, not on Pi.** Running the identical command in
+a directory holding this repo's `AGENTS.md` assembles to **9582** tokens and fails:
 
-**Nested objects and array-of-objects decode natively as of macOS 27 Beta 3 (fm
-2.0.59), and object chains of ANY depth as of Beta 4 (fm 2.0.62).** The
-`GenerationSchema duplicateType` bug that used to force every nested object through
-a JSON-string round-trip is fixed, and Beta 4 also fixed the 3+-chained-object
-`$defs` leak (verified live 5/5, system + pcc, incl. a 4-level chain). ONE shape is
-**still broken**, verified live and narrowly detected by `needsJsonRoundTrip`:
-- `array<array<object>>` (an object reached through 2+ consecutive array wrappers)
-  — Beta 4 hard-errors `500 "Failed to parse generated content."` (Beta 3 silently
-  omitted the argument). `array<array<number>>` (primitive leaf) is fine.
+| Directory | messages | tools | assembled | Result |
+|---|---|---|---|---|
+| empty | 689 | 499 | 1188 | HTTP 200 |
+| plus `AGENTS.md` | 9083 | 499 | 9582 | context exceeded |
 
-Only that residual shape still uses the JSON-string round-trip: the param is
-declared to fm as a `type:"string"` whose description says "… A JSON-encoded string
-value (must be a quoted JSON string, not raw JSON) matching: {schema}" — the
-"quoted, not raw" wording is load-bearing on Beta 4, whose parser rejects raw JSON
-in a string slot (the old phrasing deterministically provoked that) — the model
-returns JSON in that string, and the proxy re-parses it back into the real
-object/array in the tool_call's `arguments` before forwarding to Pi (including a
-one-shot HTML-entity decode for the model's occasional `&quot;`-mangled output).
-Content quality for this exotic shape is best-effort — a model limitation
-regardless of encoding, not a proxy bug. The embedded schema is stripped of decorative keys fm ignores (`description`
-on nested fields, `title`, `examples`, `default`, `$id`, …) before serialization —
-pure token savings with no loss of shape. See `EMBED_STRIP_KEYS` / `STRIP_KEYS` /
-`needsJsonRoundTrip` in `fm-proxy.js`.
+One 40 KB context file is ~8.4k tokens — twice the whole window. So on the on-device
+model, treat the 4096 tokens as a budget for *your documents*, and keep Pi out of
+directories with large `AGENTS.md`/`CLAUDE.md` files. Earlier betas could fall back to
+`pcc` and its 32k window; Beta 7 cannot, because `pcc` is gone.
 
-### Start it (from Terminal.app signed into Apple Intelligence — PCC needs the attribution)
+Two limits remain regardless of context size:
 
-**One command (recommended):** `fm-launch.sh` starts the proxy (backgrounded), then runs
-`fm serve` in the **foreground** (it blocks the terminal). It prints `stack up …` once
-fm serve is healthy:
+- **Tool calling is broken upstream.** `fm serve` does not turn the model's tool call
+  into a `tool_calls` field, so Pi can chat but cannot use tools.
+- **PCC is removed**, so there is no larger window to escape to.
 
-```bash
-./fm-launch.sh            # quiet: startup + proxy errors/warnings only
-./fm-launch.sh --verbose  # also shows the proxy's per-request [assembled] telemetry
-```
-
-> **fm serve must run in the foreground, and as of Beta 4, inside Terminal.app
-> specifically.** On Beta 3, any foreground TTY-attached `fm serve` (including panes in
-> other terminal hosts like herdr) got PCC attribution. **Beta 4 tightened this**: a
-> foreground `fm serve` in a non-Terminal host is refused with `"Private Cloud Compute
-> is not available in this context. Please use the Terminal app."` (HTTP 503) — verified
-> for both a herdr pane AND a plain foreground **Ghostty** tab (a normal, non-detached
-> process tree — so it's the host app's identity, not process detachment), while a
-> `fm serve` launched inside real Terminal.app works. Backgrounding — the old node
-> launcher (`zsh → node → fm`), or a shell `&` — still strips attribution too, even
-> from Terminal.app. `system` keeps working in
-> every context. See memory `launcher-breaks-pcc-attribution`.
-> So: run the launcher in a Terminal.app window; it foregrounds `fm serve` and
-> backgrounds the proxy (which only forwards, no PCC needed). `fm available` is a
-> one-shot that keeps PCC in every context, so it's a poor predictor of `fm serve`'s
-> attribution — don't use it to validate a launcher.
-
-Use **Ctrl-C to stop** — the trap on INT/TERM/HUP/EXIT reaps the proxy. Do **not**
-Ctrl-Z: a suspended foreground `fm serve` isn't reaped and will strand the port
-(`kill -9` the `fm serve` PID to recover). fm serve's own output is untagged (piping it
-is untested for attribution safety); only the proxy's output is tagged.
-Errors/retries/overflows are **always** shown even without `--verbose`, as is the
-per-completion **`[toks]` throughput counter** (`out=… dur=… ttft=… => N.N tok/s` —
-completion tok/s with time-to-first-token for streaming); only the routine
-`[assembled]` per-request telemetry is hidden. Ports/binary are overridable: `--fm-port`,
-`--proxy-port`, `--fm-bin`, `--health-timeout` (or the `FM_PORT`/`PROXY_PORT` env vars).
-
-**Manual (two tabs)**, if you want the processes separated:
-
-```bash
-# tab 1 — Apple's entitled engine (does the inference, incl. PCC):
-/usr/bin/fm serve --port 1976
-
-# tab 2 — the schema-flattening proxy (where Pi points):
-node fm-proxy.js          # listens on :1977, forwards to :1976
-```
-
-Point Pi's " FM" provider `baseUrl` at `http://127.0.0.1:1977/v1`. Both `system` and
-`pcc` work; `pcc` gives the 32k context. Verified: multi-tool calls with real side
-effects (`pi-minimal --model pcc -p "create a file ..."` writes + reads it back).
+Pi's own gauge counts only `messages[].content` and reported `0.2%/4.1k` for a request
+that really assembled to 9508. Do not trust it — read the proxy's `[assembled]` line.
 
 ## OpenAI-compatible usage (plug-and-play base URL)
 
@@ -222,7 +110,7 @@ The proxy is a drop-in OpenAI endpoint — point any OpenAI client at it and go:
 - **API key:** any non-empty dummy string (e.g. `sk-local`). It's loopback-only; the
   key is ignored, not validated, but most SDKs refuse to start without *some* key set.
 - **Endpoints:** `POST /v1/chat/completions` (translated), `GET /v1/models` and
-  `GET /health` (passed straight through to `fm serve`). Models are `system` and `pcc`.
+  `GET /health` (passed straight through to `fm serve`). `system` is the only model.
 - **Streaming** (`stream: true`) and **non-streaming** both work; usage is repaired
   either way (see "Token usage repair").
 - **Tools:** standard OpenAI `tools` / `tool_calls`. Rich/nested schemas are accepted —
@@ -235,7 +123,10 @@ The proxy is a drop-in OpenAI endpoint — point any OpenAI client at it and go:
   `source`) are **not** supported — use the data-URL form.
 - **CORS:** enabled (`Access-Control-Allow-Origin: *`, override with `CORS_ORIGIN`;
   `Allow-Headers: Authorization, *` so the OpenAI SDK's `x-stainless-*` headers clear
-  preflight), so browser-based clients connect directly.
+  preflight), so browser-based clients connect directly. The proxy also **strips**
+  `Origin`, `Referer` and `Sec-Fetch-*` before the upstream hop: fm serve answers any
+  request carrying them with `403 Cross-site requests are not allowed`, and a browser
+  sets them automatically.
 - **Errors:** returned as OpenAI-shaped objects — `{"error":{"message","type","code"}}`.
   The proxy **classifies** fm serve's distinct failure modes so clients can branch on
   `type`/`finish_reason` instead of string-matching Apple's prose:
@@ -245,26 +136,143 @@ The proxy is a drop-in OpenAI endpoint — point any OpenAI client at it and go:
     streamed and ends the completion with `finish_reason:"content_filter"` — so SDK
     clients receive the partial + a documented finish_reason instead of an exception.
     Deterministic + terminal (retrying the identical request re-fails identically), so
-    don't retry; change the request (rephrase, simplify, or switch to `model=system`).
+    don't retry; change the request (rephrase or simplify — there is no second model).
     Benign code triggers it — it is **not** a judgment that your content is unsafe.
-    PCC-only; `system` is unaffected.
-  - `type: "service_unavailable"` (`code: "model_unavailable"`) — `"PCC inference is not
-    available in this context"` (ModelManagerError 1013, HTTP 503): PCC attribution is
-    missing. Terminal — usually means `fm serve` isn't a direct child of your
-    Apple-Intelligence Terminal (see the launcher note above). `system` still works.
-  - `type: "rate_limit_exceeded"` (`code: -1`) — PCC capacity/rate-limit
+  - `type: "invalid_request_error"` (`code: "invalid_request"`) — any upstream HTTP 400,
+    such as an unknown model name or `n > 1`. Terminal: fm serve rejects it in ~7 ms and
+    a retry re-sends the same rejection, so the proxy surfaces it immediately.
+  - `type: "invalid_request_error"` (`code: "context_length_exceeded"`) — the prompt is
+    larger than the 4096-token window (`"The session's transcript exceeded the model's
+    context size."`). fm serve reports it as a 500, but the request is fixed, so every
+    retry re-sends the same oversized transcript. Terminal: trim the prompt. The HTTP
+    status stays fm serve's 500 — branch on `type`, as with `tool_choice_unsupported`.
+  - `type: "invalid_request_error"` (`code: "cyclic_schema"`) — a `response_format`
+    schema whose `$defs` refer to themselves. Rejected by the proxy before any upstream
+    connection, because forwarding one hangs `fm serve` permanently.
+  - `type: "rate_limit_exceeded"` (`code: -1`) — capacity/rate-limit
     (`LanguageModelError -1`), transient. The proxy retries these with backoff before
     surfacing; if you still see one, back off and retry.
   - `type: "invalid_request_error"` (`code: "tool_choice_unsupported"`) — `model:"system"`
     with a forced `tool_choice` (`"required"`, or a specific `{type:"function",...}`
-    pin) crashes fm serve's `system` engine with the *identical* `LanguageModelError -1`
-    signature used for PCC rate-limiting. Deterministic and permanent (retrying re-fails
-    identically), so the proxy checks the original request and does **not** retry it —
-    without this check it would retry-loop a permanent bug for ~19.5s before surfacing it
-    mislabeled as `rate_limit_exceeded`. `pcc` handles forced `tool_choice` fine; switch
-    models or use `tool_choice:"auto"`/omit it to work around this on `system`.
+    pin) is rejected with `500 "An unsupported generation guide was used."` Deterministic
+    and permanent (retrying re-fails identically), so the proxy does **not** retry it —
+    without this it would retry-loop a permanent bug for ~19.5s before surfacing it
+    mislabeled as `rate_limit_exceeded`. Use `tool_choice:"auto"`, or omit it. There is
+    no second model to switch to.
   - `type: "server_error"` (`code: "internal_error"` / `"upstream_unreachable"`) —
     anything else, including the `502` when `fm serve` is down.
+
+### Beta 8 (fm 2.0.68.1.402, build 26A5425a) — no change
+
+Audited 2026-08-31 against a live `fm serve` on `system`. Apple rebuilt the binary on
+Aug 27 2026, but shipped no change that this project can detect. Treat the Beta 7
+section below as the current description of upstream behaviour.
+
+The source version, the framework version, and the runtime version all hold at
+`2.0.68.1.402` / `27.0.0`. `python3 tools/gen-fm-docs.py` produces a CLI tree that is
+byte-identical to the committed one, so the diff is empty. Only the mtime moved. This
+repeats the Beta 6 pattern: a rebuild with no new surface.
+
+The behaviour layer was re-run in full, because an identical tree does not prove
+identical behaviour. Every wall reproduces:
+
+| Check | Beta 7 | Beta 8 |
+|---|---|---|
+| Tool calling | `tool_calls` null, content is clean JSON | Same |
+| Forced `tool_choice` | `500` unsupported generation guide | Same |
+| Tool with no `function.description` | `400` | Same |
+| `stream` omitted | `text/event-stream` | Same |
+| `n > 1` | `400` | Same |
+| `hello world` framing | 57 `prompt_tokens` | Same |
+| Context window | 4055 tokens pass, 8055 overflow | Same |
+| `$defs` non-cyclic + dialect | `200` | Same |
+| Titled string needs a non-empty `enum` | `400` without, `200` with | Same |
+| Bare `$defs`, no dialect | `400` on `x-order` | Same |
+| `array<array<object>>` tool param | `200` | Same |
+| `$defs` **cyclic** + dialect | Hangs, poisons the server | Same |
+| Vision | Describes a 256 px PNG correctly | Same, 130 `prompt_tokens` |
+| PCC | Absent from the binary | Same |
+
+The cyclic `$defs` hang is still the one live hazard upstream. A dialect-decorated
+`{Node: {child: $ref Node}}` sent straight to `fm serve` never answers, and `fm serve`
+answers nothing afterwards until you restart it. The proxy's guard from `57f26d3` still
+catches it first: through port 1977 the same request returns `400` / `cyclic_schema` in
+about 140 ms, and the proxy stays healthy.
+
+Licence acceptance survived the OS update again. `sudo fm license` was not needed.
+
+#### Test results
+
+All 102 unit tests pass. The wire baseline records the same 14 cases and 3 endpoints.
+`tools/harness-check.sh` reports 6 passed, 1 failed.
+
+The failure is **not** an upstream change. It is a regression in this proxy, and the
+audit found it. `pi` prints nothing for a `-p` prompt through port 1977, but prints
+normally through a bare pass-through to `fm serve`, and prints normally against another
+provider. See "A streaming cap emits two finish_reason values" below.
+
+#### A streaming cap emitted two finish_reason values — fixed
+
+The streaming cap logic appended a `finish_reason` instead of rewriting one. Upstream
+sends `finish_reason: "stop"` on its own chunk before the usage frame arrives. The proxy
+then added a second `finish_reason: "length"` on the trailing usage chunk whenever
+`completion_tokens >= max_completion_tokens`. One stream therefore carried two
+`finish_reason` values. The non-streaming path never had this defect: it rewrites the
+value in place.
+
+The fix holds the reason back. When a cap is set, upstream's chunk relays with
+`finish_reason` stripped, and the trailing chunk is the single source. An abort wins over
+the length rewrite, which wins over whatever upstream said. Uncapped requests are
+untouched. Six tests pin it, and the whole suite is 108 passing.
+
+An adversarial re-read of that fix found a second defect in it, repaired in the
+commit that follows it.
+The rewrite used `String.replace` with a string replacement, which expands `$&`,
+`` $` ``, `$'` and `$n` out of the completion text and turns the frame into unparseable
+JSON. It needs a function replacement. `fm serve` cannot trigger it, because it puts
+`finish_reason` on a bare `{delta:{}}` chunk with no text, so the defect was latent here.
+Any upstream that bundles the last content with `finish_reason` would hit it.
+
+Before the fix, with a cap at or below the real completion length:
+
+| Request | `finish_reason` values in the stream |
+|---|---|
+| `max_tokens` omitted | `["stop"]` |
+| `max_tokens: 50` on a 3-token reply | `["stop"]` |
+| `max_tokens: 3` on a 3-token reply | `["stop", "length"]` |
+| `max_tokens: 1` on a 3-token reply | `["stop", "length"]` |
+
+Every one of those now returns a single value.
+
+Note what the fix does not do. The cap never truncates the text, because `fm serve`
+already truncated it, and the `completion_tokens >= cap` test still over-reports: it
+compares a usage count that includes framing against a cap that does not. Both are the
+documented intent — under-reporting a truncation is the worse error — so both stay.
+
+The trigger is the comparison itself. The proxy tests the usage `completion_tokens`
+against the cap, and usage counts more tokens than the capped content, so a complete
+answer compares as truncated. `hello`-sized replies report 3 `completion_tokens`, which
+is `>=` any cap of 3 or less.
+
+`fm serve` does honour `max_completion_tokens` and does ignore `max_tokens`, unchanged
+from the note at `fm-proxy.js:613`. Re-verified on Beta 8: "count to 100" with
+`max_completion_tokens: 10` returns exactly 10 tokens, with `max_tokens: 10` returns
+391.
+
+This breaks `pi`. `pi` sends `max_completion_tokens: 1`, captured from a recording
+pass-through. Through that bare pass-through `pi` prints a one-token answer, because
+`fm serve` returns `["stop"]`. Through the proxy `pi` reads the trailing `"length"`,
+treats the turn as truncated, and renders nothing. `pi --mode json` shows the text did
+arrive, with `"stopReason": "length"`.
+
+`tools/harness-check.sh` still reports 6 passed, 1 failed, and that is correct. With a
+1-token cap the honest label is `length`, and `pi` hides a turn it believes was
+truncated. The remaining fault is the 1-token budget itself.
+
+`pi` sends `1` no matter what. `compaction.reserveTokens` at 8192, 1024 and 512, and the
+model's `maxTokens` at 4096 and 512, all produced the same captured `1`, and
+`models-store.json` holds no FM entry to shadow `models.json`. The cause is inside `pi`
+and is not this project's to fix.
 
 ### Beta 7 (fm 2.0.68.1.402, build 26A5421a) — PCC removed
 
@@ -352,138 +360,44 @@ described it correctly.
 was "use `pcc`". With `pcc` removed there is no longer any way to run `pi` against
 `fm serve`.
 
-### Beta 6 (26A5416b) — no Foundation Models change
+### Release history before Beta 7
 
-Audited 2026-08-17. **Nothing changed. `fm-proxy` v1.3.0 needs no update.**
+Beta 7 and Beta 8 are the supported builds, and they behave identically. The proxy no longer carries code for earlier ones.
+Kept as a short record of how the upstream behaviour arrived where it is:
 
-`fm` reports the same source version as Beta 5, `2.0.68.1.401`, and the framework
-matches. The binary itself was replaced (mtime Aug 14, was Aug 7), but
-`fm --experimental-dump-help` is byte-identical, so the CLI surface did not move. The
-licence agreement survives the OS update; `sudo fm license` is not needed again.
-
-Every Beta 5 finding reproduces exactly:
-
-| Check | Beta 6 result |
-|---|---|
-| Tool calling | Still broken. `tool_calls` null in 3/3, control tokens still leak into content. |
-| `stream` omitted | Still returns `text/event-stream`; `stream:false` still returns JSON. |
-| Prompt framing | `"hello world"` still frames to 57 prompt tokens. |
-| Forced `tool_choice` | Still 500 `"An unsupported generation guide was used."` |
-| `$defs` without the dialect | Still a fast 400 on `x-order`. |
-| `$defs` with the dialect | **Still hangs**, and still poisons the server. |
-| PCC from a background server | Still 503. Terminal.app is still required. |
-
-All 74 unit tests pass. All 11 features pass through the proxy against a live
-`fm serve`, including the image test at the same 191 prompt tokens.
-
-Testing note: the first request after `fm serve` starts can return no usage. Treat one
-cold-start failure as a warm-up, not a regression — a repeat run returned 57 prompt
-tokens 4 times out of 4.
-
-### Beta 5 (fm 2.0.68.1.401, build 26A5406e) — what changed
-
-All items verified live against `fm serve` on the `system` engine.
-
-| Area | Change | Proxy response |
+| Build | `fm` | What it changed |
 |---|---|---|
-| **License gate** | Every subcommand exits 69 until a privileged user runs `sudo fm license`. Machine-wide, needs a TTY. Blocks `--help` and `--experimental-dump-help` too, so `tools/gen-fm-docs.py` cannot run until it is accepted. | Latch on first sight, warn once, fall back to estimates. Re-probing per count would spawn `fm` twice per message and echo the banner each time. |
-| **`stream` default** | A chat request that **omits** `stream` now returns `text/event-stream`. Only an explicit `stream:false` returns JSON. Breaks every OpenAI SDK that omits the field. | Send an explicit `stream:false` upstream when the client did not ask to stream. |
-| **`count-tokens` modes** | A bare prompt counts raw tokens only ("hello world" = 3, was 11). With `-i` it matches `fm serve`'s `prompt_tokens` **exactly** (0 diff at instruction lengths 11–300). Without `-i` it sits a flat **54** low (measured at prompt lengths 6–400). | `countPromptTokens` adds `CONVERSATION_FRAMING` (54) only when there is no system message. |
-| **Forced `tool_choice`** | The `system` engine now rejects it with a clean 500 `"An unsupported generation guide was used."` in ~140 ms, instead of Beta 3/4's `LanguageModelError -1`. | New non-retryable `classifyError` branch. The new wording matched nothing, so it fell through to the retryable default and burned the whole backoff ladder. |
-| **Tool calling** | **Broken upstream, on BOTH engines.** `tool_calls` is always `null` with `finish_reason:"stop"`. On `system` raw control tokens leak into content (`"<ctrl46>get_time<ctrl46>"`); on `pcc` the content is empty. The model emits the call; `fm serve`'s parser does not read it. Reproduced direct and through the proxy, streaming and non-streaming. | None possible. Documented in the README. |
-| **String `title`** | A string property carrying `title` is now a "named string type" and 400s with `"Named string types must have a non-empty enum field"`. Object `title` is still fine. | None needed — `decorateDialect` only titles object schemas, never strings. |
+| Beta 2 `26A5368g` | 2.0.55.1.402 | Baseline. On-device model flaky after the update. |
+| Beta 3 `26A5378j` | 2.0.59 | Non-streaming token counts fixed. Nested tool params decoded natively. CORS preflight answered, real request still 403. |
+| Beta 4 `26A5388g` | 2.0.62.1.402 | `token-count` renamed `count-tokens`; `--load-transcript` renamed `--resume`. Object chains of any depth decoded. PCC began requiring Terminal.app. |
+| Beta 5 `26A5406e` | 2.0.68.1.401 | Licence gate added. `stream` default flipped to SSE. Tool calling broke. `$defs` with the dialect began hanging the server. |
+| Beta 6 `26A5416b` | 2.0.68.1.401 | Rebuilt binary, byte-identical CLI surface. No behaviour change. |
 
-**`$defs` structured output is unusable in Beta 5, and the failure is destructive.**
-Both paths are broken, and the proxy's dialect injection makes it worse:
+Two of those are still live constraints and are documented above rather than here: the
+licence gate, and the SSE default for a request that omits `stream`.
 
-| Schema sent to `fm serve` | Beta 5 result |
-|---|---|
-| `$defs` **without** the dialect | fast `400 "Key 'x-order' not found ... Path: $defs.Person"` — same as Beta 4 |
-| `$defs` **with** the dialect (what the proxy injects) | **hangs forever**, then poisons the server |
-| flat or inline-nested object | works normally |
-
-The hang is not a slow generation. After one hung `$defs` request, `fm serve` never
-recovers: the next requests time out, then fail with
-`com.apple.SensitiveContentAnalysisML error 15`, until the server is restarted.
-Isolated with controls on a freshly restarted server — a flat control passes in
-~2.5 s, a `$defs` request hangs at 40 s, and the same control then fails; five
-consecutive flat requests pass (0.6–3.8 s) with no `$defs` in the run, so
-repetition alone is not the cause. Much of what looked like general "model
-flakiness" earlier in this audit was this poisoning.
-
-**Fixed by inlining (2026-08-15).** `fixResponseFormatSchema` no longer injects the
-dialect as its primary path. It now resolves every `$ref: "#/$defs/..."` into a copy of
-its definition and deletes `$defs`, so the schema reaches `fm serve` as plain inline
-nesting — which needs no dialect keys and therefore triggers neither the 400 nor the
-hang. Sibling keys beside a `$ref` win over the target's, per JSON Schema 2020-12.
-Verified live on Beta 5: 3/3 through the proxy in 1.2–1.6 s on `system`, 672 ms on
-`pcc`, correct nested output, and plain chat healthy afterwards (no poisoning).
-
-Cyclic or unresolvable refs cannot be inlined — a self-referencing tree schema would
-expand forever — so those fall back to the old dialect injection. That is still correct
-on Beta 3/4 and no worse than before on Beta 5.
-
-**PCC results (Beta 5, `fm serve` foreground in Terminal.app, 2026-08-15):**
-
-| Test | PCC result | vs `system` |
-|---|---|---|
-| PCC attach | OK | Terminal.app still required, still works |
-| Tool calling | **BROKEN** — `tool_calls: null`, `content: ""`, 200 with 1 output token | also broken, so the break is **server-wide**, not engine-specific |
-| `tool_choice:"required"` | **accepted** | still crashes `system` only — unchanged from Beta 3/4 |
-| Structured output, flat schema | OK (`{"age": 36, "name": "Ada"}`) | same |
-| Structured output, `$defs` | fast `500 "The model's safety guardrails were triggered."` (1.1 s) | **the hang + server poisoning is `system`-only** |
-
-Two things follow. First, the tool-call break is not something a model switch works
-around — both engines are affected, though the symptom differs: `system` leaks raw
-control tokens into content, PCC returns an empty completion. Second, `$defs` fails
-on PCC in a *misleading* way: `classifyError` maps "guardrail" to
-`finish_reason:"content_filter"` and keeps the partial output, so a `$defs` request
-on PCC comes back as an empty, apparently-filtered completion rather than the schema
-error it really is. The guardrail message is upstream's, not ours — but do not read
-it as a content problem.
-
-Unchanged from Beta 4: PCC still requires Terminal.app (same 503); a missing
-`tool.description` still 400s the whole request; streaming usage still arrives via
-`stream_options.include_usage`.
-
-**End-to-end check with a real client (Pi, 2026-08-15).** Pi → proxy (:1977) →
-`fm serve` (:1976) → PCC works. Two things to know:
-
-- **Pi's full toolset no longer fits.** A first turn fails immediately with
-  "The session's transcript exceeded the model's context size" against `pcc`'s ~32k
-  ceiling. `pi-minimal` (`pi -ne -ns -np --no-themes`) works — a simple turn costs
-  ~11k, a turn with tools ~22k. See [[pcc-context-ceiling]] for the underlying
-  ceiling; Beta 5's tool framing makes the fat-toolset case worse.
-- **The tool-call break is visible from the client.** Asked to run a bash tool, the
-  model replies with a markdown code block containing the command, as prose. Nothing
-  executes, and Pi shows no tool call — exactly what `tool_calls: null` looks like from
-  the other end.
-- The provider key in `~/.pi/agent/models.json` is `" FM"` — it starts with the
-  Apple logo character. `--provider $' FM' --model pcc`; a plain `FM/pcc` will
-  not match.
-
-### Vision: the two engines encode images differently
+### Vision: how the on-device model encodes images
 
 The on-device model does **real** image understanding, not OCR. Given a text-free crop
 of a travel poster it described the scene ("people surfing and walking on a sunny beach
 with palm trees and sailboats"), named the sun's colour, and confirmed someone was
 surfing. It miscounted 3 sailboats as 4 — ordinary counting weakness, not blindness.
 
-The token cost differs sharply, and that is the useful part:
+The token cost is flat, and that is the useful part:
 
-| Image | `system` | `pcc` |
-|---|---|---|
-| 699×420, 545 KB | 187 | 303 |
-| 699×1024, 1.3 MB | 187 | — |
-| 1696×2482, 7.5 MB | 187 | 927 |
+| Image | `system` |
+|---|---|
+| 699×420, 545 KB | 187 |
+| 699×1024, 1.3 MB | 187 |
+| 1696×2482, 7.5 MB | 187 |
 
 `system` charges a **flat** cost per image no matter the resolution or file size — 14×
 the pixels costs the same 187 tokens, so roughly 130 tokens for the image on top of a
 ~57-token turn. It evidently downsamples to a fixed grid and emits a fixed-size
-embedding. `pcc` scales with resolution instead, so a bigger image buys more detail.
+embedding.
 
-Two practical consequences. Resizing before sending is pointless on `system` and
-counterproductive on `pcc`. And `system`'s fixed budget is why it reads large text
+Two practical consequences. Resizing before sending is pointless: it cannot save tokens
+and it only discards detail. And the fixed budget is why the model reads large text
 reliably but miscounts small repeated objects — there is only so much grid.
 
 Unrelated bug: `fm count-tokens --image <path>` fails with
@@ -496,9 +410,13 @@ tokens. Through the raw API that is easy — a plain turn frames to 57 tokens, a
 1024px travel-poster test image to 195. Through Pi it is not: Pi's built-in tools alone
 frame to ~11k (`Content contains 11176 tokens, which exceeds the maximum allowed
 context size of 4096`), and even `-nt` with a one-line `--system-prompt` still
-overflows. The same image and question succeed on `pcc` (32k) through Pi, and on
-`system` through the API. So `system` + an agent client is impractical; `system` + a
-thin client is fine.
+overflows **when the working directory holds a large context file**. In an empty
+directory `pi-minimal` assembles to just 1188 tokens and succeeds; adding this repo's
+`AGENTS.md` takes it to 9582 and it fails. The toolset is only 499 tokens either way, so
+the budget goes to documents, not to the harness. See "Running Pi against fm-proxy".
+
+Pi's own gauge reads `0.2%/4.1k` for a request that really assembles to 9508, because it
+counts only `messages[].content`. Do not trust it; read the proxy's `[assembled]` line.
 
 Passing an image to Pi uses `@path`: `pi ... @/tmp/poster.png "What does this say?"`
 (its own help shows `pi @prompt.md @image.png "What color is the sky?"`). Note `@path`
@@ -525,12 +443,13 @@ streaming chat, streaming usage relay, `stream`-omitted → JSON, structured out
 
 ### Known limits
 
-- Tool-parameter **nested** schemas decode natively as of Beta 3 (any object-chain
-  depth as of Beta 4), except `array<array<object>>` — still broken upstream
-  (Beta 4: hard `500 "Failed to parse generated content."`) and still round-tripped,
-  best-effort (see "Nested params" above). `response_format` nested schemas get
+- Tool-parameter **nested** schemas decode natively at every depth, `array<array<object>>`
+  included. Earlier betas needed a JSON-string round-trip for that one shape; Beta 7
+  accepts it, so the round-trip machinery is gone. `response_format` nested schemas get
   `$defs` dialect injection only — see "Structured output" below.
-- `n > 1` (multiple choices) is not honored — fm serve returns a single completion.
+- `n > 1` is rejected: `400 "n=3 is not supported. Only a single completion per request
+  is implemented."` Earlier betas accepted and silently ignored it. The proxy types the
+  400 as `invalid_request_error` and does not retry it.
 - `parallel_tool_calls: false` is **not honored** — fm serve accepts the field (200,
   no error) but ignores it entirely. Verified live: identical multi-tool-call responses
   whether the field is `true`, `false`, or omitted, on `tool_choice:"auto"`, both
@@ -542,6 +461,7 @@ streaming chat, streaming usage relay, `stream`-omitted → JSON, structured out
   (worse than passing all of them through, since most tool-calling clients iterate the
   whole `tool_calls` array regardless of what they requested). Treated the same as
   `n > 1`: a real fm serve gap, documented rather than faked.
+  (Unlike `n > 1`, `parallel_tool_calls` is still accepted silently rather than 400'd.)
 - Sampling params (`temperature`, `top_p`, `stop`, …) are passed through as-is; whatever
   `fm serve` supports applies.
 
@@ -553,9 +473,9 @@ streaming chat, streaming usage relay, `stream`-omitted → JSON, structured out
 ### Token usage repair
 
 Apple's `fm serve` used to report usage wrong on both paths — non-streaming sent
-`prompt_tokens: 0`, streaming sent no `usage` at all. **As of Beta 3 (fm 2.0.59),
-non-streaming is fixed**: verified live against `fm token-count`, the reported
-`prompt_tokens` now matches exactly, and it already reflects the **full assembled**
+`prompt_tokens: 0`, streaming sent no `usage` at all. **Non-streaming is fixed**:
+verified live against `fm count-tokens`, the reported
+`prompt_tokens` matches exactly, and it reflects the **full assembled**
 prompt (messages + tool schemas + tool_calls + per-turn framing) — fm serve's own
 number, not an estimate. The proxy passes non-streaming usage through untouched.
 
@@ -567,17 +487,16 @@ on every streaming request it forwards upstream, regardless of what the client s
 captures fm serve's real final usage-only chunk (`choices:[]` + `usage`), and relays
 it to the client — verified live for both plain-text (`finish_reason:"stop"`) and
 tool-call (`finish_reason:"tool_calls"`) completions, `prompt_tokens`/`completion_tokens`
-both accurate. The old completion-text-based estimate (via `fm count-tokens` — renamed
-from `token-count` in Beta 4; the proxy probes both names — with a `9 + chars/4.4`
-heuristic fallback) survives only as a fallback for upstreams that don't cooperate —
-e.g. a pre-Beta-3 `fm serve`, or a safety-guardrail abort that never reaches a clean
+both accurate. The old completion-text-based estimate (via `fm count-tokens`, with a
+`9 + chars/4.4` heuristic fallback) survives only as a fallback for upstreams that
+don't cooperate — e.g. a safety-guardrail abort that never reaches a clean
 finish and so never gets a real usage chunk from fm serve either.
 
-Note (Beta 4): the chat template's fixed framing grew ~150 tokens — a one-line message
-that assembled to 57 `prompt_tokens` on Beta 3 now assembles to ~208. Passthrough for
-the proxy (fm serve's own numbers), but it shrinks the usable slice of PCC's ~32k
-window, and the `[assembled]` gauge (which counts raw text, not serve's template)
-under-counts by correspondingly more.
+Note: on Beta 7 a one-line message frames to **57** `prompt_tokens`, matching Beta 3 and
+Beta 5. (Beta 4 briefly inflated this to ~208; that regression is gone.) The framing is
+passthrough for the proxy — fm serve reports its own numbers — but it eats into the
+4096-token window, and the `[assembled]` gauge counts raw text rather than fm serve's
+template, so it under-counts.
 
 The proxy still suppresses the upstream `[DONE]` and re-emits its own final chunk
 either way, so clients reading the last chunk always get *some* usage. The **client's
@@ -598,35 +517,33 @@ approximation, not fm serve's own count. Set `GAUGE_MODE=msgs` to revert to the
 messages-only number for that estimate. Also set Pi's FM provider context size to
 **32768** so the gauge *percentage* scales correctly.
 
-### Context budget — why Pi's gauge lies, and PCC's real ceiling
+### Context budget — why an agent client's gauge lies
 
-PCC's context window is **~32,768 tokens** (empirically bracketed 32,735 ok / 33,116
-"transcript exceeded the model's context size"). The gauge Pi shows
-(`countPromptTokens`) counts **only `messages[].content`** — it deliberately omits three
-things fm serve *does* frame into the prompt, so the gauge reads far lower than reality:
+The on-device window is **4096 tokens** (verified: a 4056-token prompt succeeds, ~8056
+fails with "The session's transcript exceeded the model's context size"). That is the
+whole budget; Beta 7 removed `pcc` and its ~32k window.
 
-- **tool schemas** — a flat tax present from turn 1 (a full Pi toolset measured ~11k+;
-  `pi-minimal` drops it to ~500). Constant per request, independent of conversation length.
-- **assistant `tool_calls`** — live in `m.tool_calls`, never in `content`; cumulative,
-  grows as tool calls accumulate in the replayed transcript.
-- **per-turn template framing** — applied per turn by fm serve; the gauge collapses it to one.
+A client gauge that counts only `messages[].content` reads far lower than reality,
+because fm serve also frames three things into the prompt:
+
+- **tool schemas** — a flat tax present from turn 1 (a full Pi toolset measured ~11k+,
+  which alone overflows 4096). Constant per request, independent of conversation length.
+- **assistant `tool_calls`** — live in `m.tool_calls`, never in `content`; cumulative.
+- **per-turn template framing** — applied per turn; a gauge collapses it to one.
 
 `fm-proxy.js` logs the real assembled size to **stderr** every request:
 
 ```
-[assembled] req model=pcc turns=N gauge(msgs)=… tools=… toolCalls=… perTurn=… => assembled=…
+[assembled] req model=system turns=N gauge(msgs)=… tools=… toolCalls=… perTurn=… => assembled=…
 ```
 
 and flags the failing request (`*** CONTEXT EXCEEDED ***`, `*** UPSTREAM STREAM ABORTED ***`).
-Note: `tools=` *under*-counts fm serve's true per-tool framing (it counts raw JSON; fm adds
-scaffolding), so with a fat toolset the real prompt is even bigger than `assembled` shows —
-which is why a full toolset can fail while the gauge looks comfortable. This under-count
-only affects the **streaming** gauge now — non-streaming gets fm serve's own real
-`prompt_tokens` (see "Token usage repair" above), which already reflects the true
-framing cost. **Keep tools lean** (`pi-minimal`) to reclaim most of the 32k window. The
-`system` model (separate, smaller on-device window) is useful as a *free local
-compactor* of old turns before they hit PCC — not as overflow storage.
-
+An overflow is terminal and is surfaced on the first attempt — it is not retried.
+Note: `tools=` *under*-counts fm serve's true per-tool framing (it counts raw JSON; fm
+adds scaffolding), so with a fat toolset the real prompt is bigger than `assembled`
+shows. This under-count only affects the **streaming** gauge — non-streaming gets fm
+serve's own real `prompt_tokens` (see "Token usage repair" above). **Keep tools lean**,
+or use no tools at all: 4096 tokens does not absorb a general-purpose toolset.
 ### Structured output (`response_format`)
 
 fm serve honors OpenAI `response_format: {type:"json_schema", json_schema:{name, schema}}`
