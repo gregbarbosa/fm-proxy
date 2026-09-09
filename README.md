@@ -12,8 +12,10 @@ of it and corrects those departures.
 > **Read the licence before you use this.**
 >
 > macOS 27.0 Beta 5 added a legal notice. You must accept it before `fm` runs at all.
-> Run `fm license --show` to read it without accepting it. The 27.0 RC still carries
-> the same text, recorded as `FM1 version 1.0`. It says:
+> Run `sudo fm license` to read it and accept it. After that, `fm license --show`
+> prints the text again without prompting, and `fm license --status` reports the
+> version you agreed to. The 27.0 RC still carries the same text, recorded as
+> `FM1 version 1.0`. It says:
 >
 > > YOU ARE ALSO AGREEING TO NOT PROGRAMMATICALLY ACCESS OR USE APPLE MODELS THROUGH
 > > APPLE SOFTWARE OR SERVICES EXCEPT AS EXPRESSLY PERMITTED.
