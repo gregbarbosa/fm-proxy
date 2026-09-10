@@ -28,9 +28,14 @@ That writes `docs/fm-reference.md`, a per-command option table that greps well a
 well as agent context. It runs `fm --experimental-dump-help` once, rather than scraping
 `--help` recursively.
 
-The file is **not** committed. It is generated from the installed binary, so a committed
-copy is only ever right for one machine's build, and a stale one is worse than none.
-Regenerate it after any `fm` update; never hand-edit it.
+**The file is committed on purpose.** It is generated, so committing it is unusual, but
+it is the only record of Apple's CLI surface per build. The committed copy is the "before"
+side of the structure diff in the audit recipe below, and its history is how a change like
+Beta 7's PCC removal stays visible. Read it for the build it was generated from, which
+the release-history table names.
+
+Regenerate it after any `fm` update and commit the result. Never hand-edit it: the source
+of truth is the installed binary.
 
 Some tools are local-only and are not in the repo: `tools/harness-check.sh` drives `pi`,
 and `tools/ask-image.sh` is a manual probe.
@@ -50,23 +55,18 @@ new `fm`/FoundationModels build across macOS betas, fingerprint the binary:
 
 Audit recipe after any OS update:
 
-1. **Structure** — diff the CLI tree across the update. The tree is a compile-time dump,
-   so a diff here is authoritative: Beta 7's was all deletions, which is how PCC's
-   removal was caught.
-
-   The reference is not committed, so **the "before" only exists if you made it**. Keep
-   a copy per build, outside the repo:
+1. **Structure** — regenerate the CLI tree and diff it against the committed copy:
 
    ```bash
-   # before the OS update, or any time the current build is still installed
-   python3 tools/gen-fm-docs.py --outdir ~/fm-trees/$(sw_vers -buildVersion)
-   # after
    python3 tools/gen-fm-docs.py --outdir /tmp/fmnew
-   diff ~/fm-trees/<previous-build>/fm-reference.md /tmp/fmnew/fm-reference.md
+   diff docs/fm-reference.md /tmp/fmnew/fm-reference.md
    ```
 
-   Caution: if no "before" copy exists, this layer cannot run and you must rely on the
-   behaviour layer alone. Generate one now for the build you are on.
+   The tree is a compile-time dump, so a diff here is authoritative: Beta 7's was all
+   deletions, which is how PCC's removal was caught.
+
+   Commit the regenerated file as part of the audit, whether or not it changed. An empty
+   diff is a result, and the commit records which build the tree belongs to.
 2. **Behaviour** — the help tree can stay identical while behaviour changes, and the
    reverse also happens, so re-test the known walls separately. Run the three test
    layers in `tools/TEST_PLAN.md`, then re-check by hand:
