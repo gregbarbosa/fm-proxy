@@ -233,6 +233,19 @@ not filter content. A client that parses `content` must strip them itself.
 reports 6 passed and 1 failed; the failure is the `pi` case described in
 `tools/TEST_PLAN.md`.
 
+A test skips when `fm` cannot answer, so a run during a model-service fault reports 106
+passed and 2 skipped. That is the machine, not the code.
+
+Caution: pin `FM_BIN` to a path that does not exist for **both** runs when you compare
+wire baselines. The stub replaces the upstream engine, but the proxy still shells out to
+`fm count-tokens` for its usage fallback, so a machine whose model service is down
+produces a different baseline from identical code. Pinning it forces the fixed
+`chars / 4.4` heuristic, and the baseline then depends only on the code.
+
+```bash
+FM_BIN=/nonexistent node tools/wire-baseline.js /tmp/after.json
+```
+
 ### Release history
 
 Beta 7 and later are the supported builds. The proxy carries no code for earlier ones.
