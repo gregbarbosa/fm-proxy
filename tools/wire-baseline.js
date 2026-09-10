@@ -90,6 +90,7 @@ const CASES = [
   ["stream true", { model: "system", messages: M, max_tokens: 10, stream: true }],
   ["stream true, usage declined", { model: "system", messages: M, max_tokens: 10, stream: true, stream_options: { include_usage: false } }],
   ["system message", { model: "system", messages: [{ role: "system", content: "Be brief." }, ...M], max_tokens: 10, stream: false }],
+  ["developer message", { model: "system", messages: [{ role: "developer", content: "Be brief." }, ...M], max_tokens: 10, stream: false }],
   ["multi turn", { model: "system", messages: [{ role: "user", content: "a" }, { role: "assistant", content: "b" }, { role: "user", content: "c" }], max_tokens: 10, stream: false }],
   ["tool basic", { model: "system", messages: M, tools: [TOOL], max_tokens: 10, stream: false }],
   ["tool missing description", { model: "system", messages: M, tools: [TOOL_NODESC], max_tokens: 10, stream: false }],
