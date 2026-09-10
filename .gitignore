@@ -1,2 +1,7 @@
 .DS_Store
 tools/
+
+# Local tool artifacts and scratch work, not part of the proxy.
+.firecrawl/
+.fms/
+apple-clone/
