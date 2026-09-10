@@ -23,15 +23,15 @@ const RETRY_BASE_MS = Number(process.env.FM_RETRY_BASE_MS ?? 1000);
 const RETRY_CAP_MS = Number(process.env.FM_RETRY_CAP_MS ?? 15000);
 
 // ── Token counting ───────────────────────────────────────────────────────────
-// Fallback only (fm serve sends real usage) plus the assembled-size instrumentation
-// below. `fm count-tokens` where possible, chars/4.4 heuristic when it's unavailable.
+// Fallback only: fm serve sends real usage, so this runs when a request ends without
+// one (a guardrail abort). `fm count-tokens` where possible, chars/4.4 heuristic when
+// it is unavailable. Every count forks `fm` synchronously and blocks the event loop,
+// so callers must stay off the hot path.
 const CHARS_PER_TOKEN = 4.4;
-// Two measured framing constants — they reproduce fm serve's prompt_tokens exactly,
-// do not "simplify": CONVERSATION_FRAMING is the fixed cost around a whole
-// conversation (present only with -i; flat 54 at lengths 6–400); PER_MESSAGE_FRAMING
-// is the cost of splitting text across turns (4 per message beyond the first).
+// A measured constant that reproduces fm serve's prompt_tokens exactly — do not
+// "simplify" it. It is the fixed cost around a whole conversation, present only with
+// -i, and flat at 54 for lengths 6 to 400.
 const CONVERSATION_FRAMING = 54;
-const PER_MESSAGE_FRAMING = 4;
 
 // Content-only estimate; framing is added by the caller that needs it.
 function estimateTokens(text) {
@@ -118,50 +118,6 @@ function countPromptTokens(messages) {
   // With -i the count matches fm serve's prompt_tokens exactly; without it it sits 54
   // low (the conversation framing), so add it back for system-less requests.
   return instructions ? n : n + CONVERSATION_FRAMING;
-}
-
-// ── Assembled-request instrumentation ────────────────────────────────────────
-// The gauge counts only messages[].content; fm serve also frames tool schemas, prior
-// tool_calls (m.tool_calls, not content), and a per-turn wrapper — log the real size.
-function assembledTokenBreakdown(parsedReq, fixedBody) {
-  const messages = (parsedReq && parsedReq.messages) || [];
-  // 1. messages content — the current gauge number.
-  const msgTokens = countPromptTokens(messages);
-  // 2. flattened tool schemas as forwarded to fm serve.
-  let tools = (parsedReq && parsedReq.tools) || null;
-  try { const f = JSON.parse(fixedBody); if (f && f.tools) tools = f.tools; } catch {}
-  const toolsJson = tools && tools.length ? JSON.stringify(tools) : "";
-  const toolTokens = toolsJson
-    ? (fmTokenCount(toolsJson) ?? estimateTokens(toolsJson))
-    : 0;
-  // 3. assistant tool_calls — invisible to splitMessages (content is null).
-  let toolCallText = "";
-  for (const m of messages) {
-    if (Array.isArray(m.tool_calls)) {
-      for (const tc of m.tool_calls) {
-        const fn = tc && tc.function;
-        if (fn) toolCallText += (fn.name || "") + (fn.arguments || "");
-      }
-    }
-  }
-  const toolCallTokens = toolCallText
-    ? (fmTokenCount(toolCallText) ?? estimateTokens(toolCallText))
-    : 0;
-  // 4. per-turn framing — the gauge collapses it to a single overhead.
-  const nonSystemTurns = messages.filter((m) => m.role !== "system").length;
-  const perTurnExtra = PER_MESSAGE_FRAMING * Math.max(0, nonSystemTurns - 1);
-  const assembledTotal = msgTokens + toolTokens + toolCallTokens + perTurnExtra;
-  return { msgTokens, toolTokens, toolCallTokens, perTurnExtra,
-           turns: nonSystemTurns, assembledTotal };
-}
-
-function logBreakdown(tag, model, b) {
-  console.error(
-    `[assembled] ${tag} model=${model} turns=${b.turns} ` +
-    `gauge(msgs)=${b.msgTokens} tools=${b.toolTokens} ` +
-    `toolCalls=${b.toolCallTokens} perTurn=${b.perTurnExtra} ` +
-    `=> assembled=${b.assembledTotal}`
-  );
 }
 
 // One-line throughput counter per completion; guards zero-token/zero-time.
@@ -638,21 +594,12 @@ function prepareUpstreamRequest(req, body) {
     parsedReq.stream = false;
     fixed = JSON.stringify(parsedReq);
   }
-  // The full assembled size: the fallback number when fm serve sends no usage (e.g.
-  // guardrail abort), logged per request to tie overflows to a real size. Messages
-  // match fm serve exactly; the tool-schema part under-counts. GAUGE_MODE=msgs selects
-  // the messages-only number (kept: an undocumented debug hatch the TEST harness
-  // sets for deterministic [assembled] output — see startStack in fm-proxy.test.js).
-  let breakdown = null;
-  if (isChat && parsedReq) {
-    breakdown = assembledTokenBreakdown(parsedReq, fixed);
-    logBreakdown("req", parsedReq.model || "unknown", breakdown);
-  }
-  const promptTokens = !isChat || !parsedReq
-    ? 0
-    : process.env.GAUGE_MODE === "msgs"
-      ? breakdown.msgTokens
-      : breakdown.assembledTotal;
+  // Prompt tokens for the rare case where fm serve sends no usage at all (a guardrail
+  // abort that never finishes). Counting forks `fm` synchronously, which blocks the
+  // event loop, so never do it on the hot path: the relays call this only when the
+  // fallback actually fires.
+  const promptTokensFallback = () =>
+    isChat && parsedReq ? countPromptTokens(parsedReq.messages) : 0;
 
   // Always forward a fully-buffered body with our own Content-Length; drop any
   // inbound Transfer-Encoding — keeping both is illegal framing and upstream rejects
@@ -670,7 +617,7 @@ function prepareUpstreamRequest(req, body) {
     if (h === "origin" || h === "referer" || h.startsWith("sec-fetch-")) delete upstreamHeaders[h];
   }
   return { fixed, upstreamHeaders, parsedReq, isChat, isStream,
-           clientDeclinedUsage, breakdown, promptTokens, cappedAt, responseFormatCycle };
+           clientDeclinedUsage, promptTokensFallback, cappedAt, responseFormatCycle };
 }
 
 // ── Attempt gate ───────────────────────────────────────────────────────────
@@ -707,7 +654,7 @@ function createAttemptGate({ res, proxyRes, proxyReq, plan, attempt, isStream, d
 // Relays one upstream SSE chat stream: line pump, preamble hold-back, typed error
 // frames, guardrail abort, final usage/finish chunk.
 function relayStreamingChat({ res, proxyRes, diag, commit, isCommitted, fail, isAborting, cappedAt,
-                              parsedReq, promptTokens, clientDeclinedUsage, reqStart }) {
+                              parsedReq, promptTokensFallback, clientDeclinedUsage, reqStart }) {
   // Real usage needs the forced include_usage upstream; completionText stays a fallback.
   let completionText = "";
   let realUsage = null;   // fm serve's own usage object, if it sent one
@@ -871,11 +818,11 @@ function relayStreamingChat({ res, proxyRes, diag, commit, isCommitted, fail, is
     // Prefer fm serve's real usage over the completionText estimate; the estimate
     // only fires when no usage frame arrives at all (e.g. a guardrail abort that
     // never finishes).
-    const usage = realUsage || {
-      prompt_tokens: promptTokens,
-      completion_tokens: completionTokens,
-      total_tokens: promptTokens + completionTokens,
-    };
+    let usage = realUsage;
+    if (!usage) {
+      const pt = promptTokensFallback();
+      usage = { prompt_tokens: pt, completion_tokens: completionTokens, total_tokens: pt + completionTokens };
+    }
     const meta = lastChunkMeta || {};
     // Same truncation mislabel as the non-streaming path: fm serve says "stop" even when
     // it stopped at the cap. Only rewrite a plain stop — never an abort's content_filter.
@@ -933,7 +880,7 @@ function applyLengthFinish(obj, cappedAt) {
 }
 
 function relayNonStreamingChat({ res, proxyRes, diag, fail, isAborting, markCommitted,
-                                 parsedReq, promptTokens, reqStart, cappedAt }) {
+                                 parsedReq, promptTokensFallback, reqStart, cappedAt }) {
 // Non-streaming: buffer fully (so we can still retry), then fix usage.
 let raw = "";
 proxyRes.on("data", (c) => (raw += c));
@@ -951,7 +898,8 @@ proxyRes.on("end", () => {
         id: "chatcmpl-proxy", object: "chat.completion",
         model: (parsedReq && parsedReq.model) || "unknown",
         choices: [{ index: 0, message: { role: "assistant", content: "" }, finish_reason: "content_filter" }],
-        usage: { prompt_tokens: promptTokens, completion_tokens: 0, total_tokens: promptTokens },
+        usage: (() => { const pt = promptTokensFallback();
+                        return { prompt_tokens: pt, completion_tokens: 0, total_tokens: pt }; })(),
       };
       outStatus = 200;
     } else if (retryOrSurface(cls, "non-stream", `— ${raw.slice(0, 200)}`, "non-stream error", fail, diag)) {
@@ -996,14 +944,11 @@ const server = http.createServer((req, res) => {
     const reqStart = Date.now();
     const ctx = prepareUpstreamRequest(req, body);
     const { fixed, upstreamHeaders, parsedReq, isChat, isStream,
-            clientDeclinedUsage, breakdown, promptTokens, cappedAt, responseFormatCycle } = ctx;
+            clientDeclinedUsage, promptTokensFallback, cappedAt, responseFormatCycle } = ctx;
 
     // One-line diagnostic binding a failure to this request's assembled size.
-    const diag = (label, extra = "") => console.error(
-      `[assembled] *** ${label} *** assembled=` +
-      `${breakdown ? breakdown.assembledTotal : "?"} (gauge ${promptTokens})` +
-      (extra ? ` ${extra}` : "")
-    );
+    const diag = (label, extra = "") =>
+      console.error(`[fm-proxy] *** ${label} ***` + (extra ? ` ${extra}` : ""));
 
     // A cyclic $defs in response_format would hang fm serve PERMANENTLY — only a
     // restart clears it, and every later request hangs too (Beta 7). Reject it here,
@@ -1046,7 +991,7 @@ const server = http.createServer((req, res) => {
 
           const g = createAttemptGate({ res, proxyRes, proxyReq, plan, attempt, isStream, diag });
           gate = g;
-          const relay = { res, proxyRes, diag, ...g, parsedReq, promptTokens, reqStart, cappedAt };
+          const relay = { res, proxyRes, diag, ...g, parsedReq, promptTokensFallback, reqStart, cappedAt };
           if (isStream) relayStreamingChat({ ...relay, clientDeclinedUsage });
           else relayNonStreamingChat(relay);
         }
