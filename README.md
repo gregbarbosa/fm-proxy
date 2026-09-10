@@ -71,11 +71,15 @@ described below.
 >
 > On the RC the content is no longer clean. Most replies to a request that carries
 > `tools` also contain raw chat-template markers such as `<start_of_turn>` and
-> `<ctrl46>`. Seven of 10 direct replies and 9 of 10 replies through the proxy carried
-> one. The proxy does not remove them, because it corrects envelopes and schemas and
-> does not filter content. Strip them in your client if you parse `content`.
+> `<ctrl46>`. Measured at 7 of 10 direct replies and 8 to 9 of 10 through the proxy.
 >
 > The leak needs `tools` in the request. Ordinary chat is not affected.
+>
+> Set `FM_STRIP_TEMPLATE_MARKERS=1` to remove them from `content` on both the streaming
+> and non-streaming paths. It is **off by default**, because the proxy otherwise
+> corrects only envelopes and schemas and does not filter content, and because the
+> markers are how you detect the upstream bug. With the flag on, 10 of 10 replies came
+> back clean and the tool call inside them was untouched.
 >
 > Do not use tool calling for work that you must trust. The proxy still repairs tool
 > schemas, so tool calling returns without a change here once `fm serve` reads the
@@ -157,6 +161,13 @@ print(client.chat.completions.create(
 
 `FM_PORT`, `PROXY_PORT`, and `FM_BIN` replace the matching options. The proxy reads
 `FM_BIN` too, for the `fm count-tokens` fallback.
+
+Two more environment variables the proxy reads on its own:
+
+| Variable | Effect |
+|---|---|
+| `FM_STRIP_TEMPLATE_MARKERS=1` | Remove leaked chat-template markers from `content`. Off by default. |
+| `CORS_ORIGIN` | Replace the `*` in `Access-Control-Allow-Origin`. |
 
 Run the tests with `node --test`.
 
