@@ -2145,3 +2145,17 @@ test("streaming: text before a never-matched stop is still delivered whole", asy
   }
   assert.strictEqual(text, "alphabeta", "nothing may be swallowed by the hold-back");
 });
+
+test("classifyError types json_object so clients need not match Apple's prose", () => {
+  const c = classifyError("response_format type 'json_object' is not supported. Use 'json_schema' instead.", 400);
+  assert.strictEqual(c.type, "invalid_request_error");
+  assert.strictEqual(c.code, "json_object_unsupported");
+  assert.strictEqual(c.retry, false);
+});
+
+test("reasoning_effort is dropped: it can never succeed with pcc gone", () => {
+  const { body } = fixTools(JSON.stringify({
+    model: "system", messages: [{ role: "user", content: "hi" }], reasoning_effort: "low",
+  }));
+  assert.strictEqual("reasoning_effort" in JSON.parse(body), false);
+});

@@ -428,6 +428,10 @@ function fixTools(body) {
     // must not reach upstream; the caller reads it back off `parsed`.
     const stopSequences = parsed.stop;
     delete parsed.stop;
+    // `reasoning_effort` was a pcc-only knob and pcc was removed from the binary, so on
+    // `system` it can only ever 400. Drop it rather than fail a request over a field
+    // that has no effect either way.
+    delete parsed.reasoning_effort;
     if (parsed.tools) {
       parsed.tools = parsed.tools.map((tool) => {
         const schema = fixToolSchema(tool.function?.parameters);
@@ -517,6 +521,14 @@ function classifyError(msg, status) {
              label: "CONTEXT EXCEEDED",
              clientMessage: "The session's transcript exceeded the model's context size " +
                "— context length exceeded. Reduce the prompt or compact the conversation." };
+  // fm serve only does schema-constrained JSON, not OpenAI's free-form `json_object`
+  // mode. Its own message already says to use `json_schema`, which is more actionable
+  // than most; give it a code too, so a client can branch instead of matching prose.
+  // Not translated to a permissive schema: that would silently narrow "any JSON" to
+  // "this JSON".
+  if (m.includes("'json_object' is not supported"))
+    return { type: "invalid_request_error", code: "json_object_unsupported", retry: false,
+             label: "JSON_OBJECT MODE UNSUPPORTED" };
   // A genuine rate limit. Do NOT reclassify this on the request's shape: forced
   // tool_choice has its own message (handled above), so any extra reclassification here
   // would only mislabel a real rate limit as a permanent client error and skip the

@@ -54,6 +54,7 @@ a diff:
   `response_format`, at every depth
 - `stop` is removed from the forwarded body, on both the streaming and the
   non-streaming path, and applied by the proxy instead
+- `reasoning_effort` is removed from the forwarded body
 
 ## Layer 3 — harness check
 
