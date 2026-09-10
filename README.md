@@ -159,15 +159,37 @@ print(client.chat.completions.create(
   --health-timeout <ms>  wait for fm serve      (default 20000)
 ```
 
-`FM_PORT`, `PROXY_PORT`, and `FM_BIN` replace the matching options. The proxy reads
-`FM_BIN` too, for the `fm count-tokens` fallback.
+The proxy reads its whole configuration from the environment, so these work whether you
+start it with `fm-launch.sh` or run `node fm-proxy.js` yourself:
 
-Two more environment variables the proxy reads on its own:
+| Variable | Default | Effect |
+|---|---|---|
+| `PROXY_PORT` | `1977` | Port the proxy listens on. |
+| `FM_PORT` | `1976` | Port `fm serve` listens on. |
+| `FM_BIN` | `/usr/bin/fm` | Path to the `fm` binary, used for the token-count fallback. |
+| `FM_STRIP_TEMPLATE_MARKERS` | off | Set to `1` to remove leaked chat-template markers from `content`. See below. |
+| `CORS_ORIGIN` | `*` | Replaces the value in `Access-Control-Allow-Origin`. |
+| `FM_MAX_RETRIES` | `4` | Retries for a transient upstream failure. `0` disables retrying. |
+| `FM_RETRY_BASE_MS` | `1000` | First retry delay; it doubles each attempt. |
+| `FM_RETRY_CAP_MS` | `15000` | Ceiling on that delay. |
 
-| Variable | Effect |
-|---|---|
-| `FM_STRIP_TEMPLATE_MARKERS=1` | Remove leaked chat-template markers from `content`. Off by default. |
-| `CORS_ORIGIN` | Replace the `*` in `Access-Control-Allow-Origin`. |
+### Stripping leaked template markers
+
+`fm serve` puts its own chat-template delimiters into `content` on most replies to a
+request that carries `tools` — `<start_of_turn>`, `<ctrl46>`, and similar. If your client
+reads `content`, it reads those too.
+
+```bash
+FM_STRIP_TEMPLATE_MARKERS=1 ./fm-launch.sh
+```
+
+Measured on the 27.0 RC: 8 of 10 replies leaked with the flag off, and 0 of 10 with it
+on, while the rate at which replies carried a real tool call did not change.
+
+It is off by default for two reasons. The proxy otherwise corrects only envelopes and
+schemas and never edits the model's words, and the markers are the signal that shows the
+upstream bug is still there. Turn it on if you are consuming `content`; leave it off if
+you are testing what `fm serve` actually does.
 
 Run the tests with `node --test`.
 
@@ -185,6 +207,7 @@ Each item below is a live-verified `fm serve` behaviour that breaks OpenAI clien
 | A tool parameter that uses `$ref` loses its structure. | Resolves the references before simplifying. |
 | A self-referencing `$defs` schema hangs the server permanently. | Rejects it with `400` `cyclic_schema` before opening an upstream connection. |
 | A request that carries `Origin` or `Referer` is refused as cross-site. | Strips that header family on the upstream hop, so browser clients work. |
+| Replies to a tool request leak chat-template markers into `content`. | Removes them — **opt-in**, `FM_STRIP_TEMPLATE_MARKERS=1`. |
 
 Apple's error messages are generic, so the proxy gives each one a type. A safety stop
 becomes `finish_reason:"content_filter"` and keeps the partial output. A rate limit
@@ -203,7 +226,11 @@ the proxy.
 | `fm-proxy.js` | The proxy. |
 | `fm-launch.sh` | Launcher for `fm serve` and the proxy. |
 | `fm-proxy.test.js` | Unit and integration tests. |
-| `AGENTS.md` | Technical notes: token accounting, per-beta findings. |
-| `docs/fm-reference.md` | Generated `fm` CLI reference. |
+| `AGENTS.md` | What `fm serve` does, what the proxy corrects, and the audit recipe. |
+| `docs/fm-reference.md` | Generated `fm` CLI reference, committed per build. |
+| `tools/TEST_PLAN.md` | The three test layers and how to read a failure. |
+| `tools/wire-baseline.js` | Records exactly what the proxy forwards, to prove a refactor changed nothing. |
+| `tools/deviation-probe.js` | Checks a running proxy against every `fm serve` deviation. |
+| `tools/gen-fm-docs.py` | Regenerates `docs/fm-reference.md` from the installed binary. |
 
 [MIT](LICENSE).
