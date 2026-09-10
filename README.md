@@ -69,9 +69,11 @@ described below.
 > `content`, for example `{"tool_call": [{"name": "get_weather", "arguments":
 > {"city": "Tokyo"}}]}`. Only the upstream parser step is missing.
 >
-> On the RC the content is no longer clean. Most replies to a request that carries
-> `tools` also contain raw chat-template markers such as `<start_of_turn>` and
-> `<ctrl46>`. Measured at 7 of 10 direct replies and 8 to 9 of 10 through the proxy.
+> The content is not clean. Most replies to a request that carries `tools` also contain
+> raw chat-template markers such as `<start_of_turn>` and `<ctrl46>`. The counts on the
+> 27.0 RC are 7 of 10 direct replies and 8 to 9 of 10 through the proxy. The leak is not
+> new on the RC. A clean-room record dated 2026-08-18 shows the same markers on Beta 7.
+> Earlier tests missed it.
 >
 > The leak needs `tools` in the request. Ordinary chat is not affected.
 >
