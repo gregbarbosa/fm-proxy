@@ -369,9 +369,20 @@ streaming chat, streaming usage relay, `stream`-omitted → JSON, structured out
   whole `tool_calls` array regardless of what they requested). Treated the same as
   `n > 1`: a real fm serve gap, documented rather than faked.
   (Unlike `n > 1`, `parallel_tool_calls` is still accepted silently rather than 400'd.)
+- The clean-room REPORT.md, item R6, is wrong. It claims `parallel_tool_calls` returns
+  400. fm serve returns 200 and silently ignores the field. Live probes on the 27.0 RC
+  confirmed this.
 - `stop` is withheld from `fm serve`, which 400s on it, and applied by the proxy. Other
   sampling params (`temperature`, `top_p`, …) are passed through as-is; whatever
   `fm serve` supports applies.
+- fm serve accepts `logprobs` and `top_logprobs` and ignores them. No logprob data
+  exists to synthesize, so the proxy returns none.
+- A union of two real types has no single form in the fm schema subset. The behaviour
+  depends on how the client spells it. A `type` array, such as `["string","number"]`,
+  collapses to its first member on both paths. An `anyOf` union collapses on the tool
+  path, but the `response_format` path forwards it and fm serve returns a 400. Every
+  collapse is lossy.
+- The proxy does not decompress a gzip request body. No chat client sends one.
 
 > Implementation note: the proxy buffers each request body and sets its own
 > `Content-Length`, stripping any inbound/upstream `Transfer-Encoding` so a client that
