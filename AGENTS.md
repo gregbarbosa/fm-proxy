@@ -18,17 +18,22 @@ the `fm` binary altogether.
 
 ## `fm` CLI reference
 
-The full `fm` command tree (every subcommand, option, default, and discussion) is
-generated from Apple's binary and committed for offline/agent use. Pull from these
-instead of re-deriving help text:
+Generate the full `fm` command tree before you work on the CLI surface:
 
-| Resource | Path | Notes |
-|---|---|---|
-| Generator | `tools/gen-fm-docs.py` | Runs `fm --experimental-dump-help` (one call, no recursive `--help` scraping) and emits the markdown reference. Re-run after any `fm` update: `python3 tools/gen-fm-docs.py`. |
-| Markdown reference | `docs/fm-reference.md` | Per-command option tables; best for grepping / LLM context. |
+```bash
+python3 tools/gen-fm-docs.py
+```
 
-Source of truth is the installed binary (`/usr/bin/fm`): the docs reflect whatever
-version is on disk, so regenerate rather than hand-editing.
+That writes `docs/fm-reference.md`, a per-command option table that greps well and reads
+well as agent context. It runs `fm --experimental-dump-help` once, rather than scraping
+`--help` recursively.
+
+The file is **not** committed. It is generated from the installed binary, so a committed
+copy is only ever right for one machine's build, and a stale one is worse than none.
+Regenerate it after any `fm` update; never hand-edit it.
+
+Some tools are local-only and are not in the repo: `tools/harness-check.sh` drives `pi`,
+and `tools/ask-image.sh` is a manual probe.
 
 ### Fingerprinting the `fm` version (no `--version` flag)
 
@@ -45,11 +50,23 @@ new `fm`/FoundationModels build across macOS betas, fingerprint the binary:
 
 Audit recipe after any OS update:
 
-1. **Structure** — regenerate and diff the CLI tree:
-   `python3 tools/gen-fm-docs.py --outdir /tmp/fmnew` then
-   `diff docs/fm-reference.md /tmp/fmnew/fm-reference.md`.
-   The tree is a compile-time dump, so a diff here is authoritative: Beta 7's was all
-   deletions, which is how PCC's removal was caught.
+1. **Structure** — diff the CLI tree across the update. The tree is a compile-time dump,
+   so a diff here is authoritative: Beta 7's was all deletions, which is how PCC's
+   removal was caught.
+
+   The reference is not committed, so **the "before" only exists if you made it**. Keep
+   a copy per build, outside the repo:
+
+   ```bash
+   # before the OS update, or any time the current build is still installed
+   python3 tools/gen-fm-docs.py --outdir ~/fm-trees/$(sw_vers -buildVersion)
+   # after
+   python3 tools/gen-fm-docs.py --outdir /tmp/fmnew
+   diff ~/fm-trees/<previous-build>/fm-reference.md /tmp/fmnew/fm-reference.md
+   ```
+
+   Caution: if no "before" copy exists, this layer cannot run and you must rely on the
+   behaviour layer alone. Generate one now for the build you are on.
 2. **Behaviour** — the help tree can stay identical while behaviour changes, and the
    reverse also happens, so re-test the known walls separately. Run the three test
    layers in `tools/TEST_PLAN.md`, then re-check by hand:
