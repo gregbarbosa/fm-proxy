@@ -93,6 +93,8 @@ const CASES = [
   ["stream true, usage declined", { model: "system", messages: M, max_tokens: 10, stream: true, stream_options: { include_usage: false } }],
   ["system message", { model: "system", messages: [{ role: "system", content: "Be brief." }, ...M], max_tokens: 10, stream: false }],
   ["developer message", { model: "system", messages: [{ role: "developer", content: "Be brief." }, ...M], max_tokens: 10, stream: false }],
+  ["stop sequences", { model: "system", messages: M, max_tokens: 10, stream: false, stop: ["STOP"] }],
+  ["stop sequences streaming", { model: "system", messages: M, max_tokens: 10, stream: true, stop: ["STOP"] }],
   ["tool with nullable param", { model: "system", messages: M, max_tokens: 10, stream: false, tools: [TOOL_NULLABLE] }],
   ["response_format nullable types", { model: "system", messages: M, max_tokens: 10, stream: false, response_format: RF_NULLABLE }],
   ["multi turn", { model: "system", messages: [{ role: "user", content: "a" }, { role: "assistant", content: "b" }, { role: "user", content: "c" }], max_tokens: 10, stream: false }],

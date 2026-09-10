@@ -99,8 +99,8 @@ described below.
 
 `fm serve` rejects `n > 1` with `400 n=3 is not supported. Only a single completion per
 request is implemented.` The proxy types that as `invalid_request_error` and does not
-retry it. `parallel_tool_calls` is accepted and then ignored. Sampling parameters pass
-through unchanged.
+retry it. `parallel_tool_calls` is accepted and then ignored. `stop` is applied by the
+proxy, because `fm serve` rejects it. Other sampling parameters pass through unchanged.
 
 ## Requirements
 

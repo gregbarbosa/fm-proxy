@@ -367,7 +367,8 @@ streaming chat, streaming usage relay, `stream`-omitted → JSON, structured out
   whole `tool_calls` array regardless of what they requested). Treated the same as
   `n > 1`: a real fm serve gap, documented rather than faked.
   (Unlike `n > 1`, `parallel_tool_calls` is still accepted silently rather than 400'd.)
-- Sampling params (`temperature`, `top_p`, `stop`, …) are passed through as-is; whatever
+- `stop` is withheld from `fm serve`, which 400s on it, and applied by the proxy. Other
+  sampling params (`temperature`, `top_p`, …) are passed through as-is; whatever
   `fm serve` supports applies.
 
 > Implementation note: the proxy buffers each request body and sets its own

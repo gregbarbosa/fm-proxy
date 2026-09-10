@@ -31,6 +31,23 @@ function stripTemplateMarkers(text) {
   return text.replace(TEMPLATE_MARKER, "");
 }
 
+// fm serve rejects `stop` with "stop sequences are not supported. Truncate the model's
+// output client-side." The proxy is the client, so it does that: `stop` is dropped from
+// the forwarded body and the reply is cut at the earliest match, which is removed.
+// OpenAI specifies that the returned text does not contain the stop sequence.
+// An empty string never matches — otherwise it would truncate everything at index 0.
+function truncateAtStop(text, stop) {
+  const list = (typeof stop === "string" ? [stop] : Array.isArray(stop) ? stop : [])
+    .filter((sq) => typeof sq === "string" && sq.length > 0);
+  if (typeof text !== "string" || !list.length) return { text, hit: false };
+  let cut = -1;
+  for (const sq of list) {
+    const i = text.indexOf(sq);
+    if (i !== -1 && (cut === -1 || i < cut)) cut = i;
+  }
+  return cut === -1 ? { text, hit: false } : { text: text.slice(0, cut), hit: true };
+}
+
 // fm serve has DISTINCT failure modes this proxy must not conflate (see
 // classifyError): transient rate-limits are retried with backoff; safety-guardrail
 // aborts, forced-tool_choice rejections and HTTP 400s are deterministic + terminal
@@ -407,6 +424,10 @@ function fixTools(body) {
     if (Array.isArray(parsed.messages)) {
       for (const m of parsed.messages) if (m && m.role === "developer") m.role = "system";
     }
+    // fm serve 400s on `stop`. The proxy applies it to the reply instead, so the field
+    // must not reach upstream; the caller reads it back off `parsed`.
+    const stopSequences = parsed.stop;
+    delete parsed.stop;
     if (parsed.tools) {
       parsed.tools = parsed.tools.map((tool) => {
         const schema = fixToolSchema(tool.function?.parameters);
@@ -440,7 +461,10 @@ function fixTools(body) {
         js.schema = fixResponseFormatSchema(js.schema);
       }
     }
-    return { body: JSON.stringify(parsed), parsed };
+    // `stop` is returned on its own, NEVER re-attached to `parsed`. Callers re-serialise
+    // `parsed` later (to force stream_options, or to apply a cap), and anything left on
+    // it goes back on the wire — which is how `stop` reached fm serve and 400'd.
+    return { body: JSON.stringify(parsed), parsed, stopSequences };
   } catch {
     return { body, parsed: null };
   }
@@ -543,7 +567,7 @@ function retryOrSurface(cls, ctxLabel, extra, reason, fail, diag) {
 
 // Exported for tests when required as a module; harmless when run directly.
 if (require.main !== module) {
-  module.exports = { fixTools, fixToolSchema, fixResponseFormatSchema, findCyclicDefs, classifyError, errorFrame, fmTokenCount, _isLicenseGate, stripTemplateMarkers };
+  module.exports = { fixTools, fixToolSchema, fixResponseFormatSchema, findCyclicDefs, classifyError, errorFrame, fmTokenCount, _isLicenseGate, stripTemplateMarkers, truncateAtStop };
 }
 
 // CORS for browser clients; `*` by default, override with CORS_ORIGIN, on every response.
@@ -602,7 +626,7 @@ function createRetryPlan(res, diag, fire) {
 // Build the upstream payload and the per-request context: schema rewrites, stream
 // fixups, header scrubbing, and the lazy token-count fallback.
 function prepareUpstreamRequest(req, body) {
-  const { body: toolFixed, parsed: parsedReq, responseFormatCycle } = fixTools(body);
+  const { body: toolFixed, parsed: parsedReq, responseFormatCycle, stopSequences } = fixTools(body);
 
   const isChat = !!(req.url && req.url.includes("/chat/completions"));
   const isStream = !!(parsedReq && parsedReq.stream);
@@ -667,7 +691,7 @@ function prepareUpstreamRequest(req, body) {
     if (h === "origin" || h === "referer" || h.startsWith("sec-fetch-")) delete upstreamHeaders[h];
   }
   return { fixed, upstreamHeaders, parsedReq, isChat, isStream,
-           clientDeclinedUsage, promptTokensFallback, cappedAt, responseFormatCycle };
+           clientDeclinedUsage, promptTokensFallback, cappedAt, responseFormatCycle, stopSequences };
 }
 
 // ── Attempt gate ───────────────────────────────────────────────────────────
@@ -704,11 +728,32 @@ function createAttemptGate({ res, proxyRes, proxyReq, plan, attempt, isStream, d
 // Relays one upstream SSE chat stream: line pump, preamble hold-back, typed error
 // frames, guardrail abort, final usage/finish chunk.
 function relayStreamingChat({ res, proxyRes, diag, commit, isCommitted, fail, isAborting, cappedAt,
-                              parsedReq, promptTokensFallback, clientDeclinedUsage, reqStart }) {
+                              parsedReq, promptTokensFallback, clientDeclinedUsage, reqStart, stopSequences }) {
   // Real usage needs the forced include_usage upstream; completionText stays a fallback.
   let completionText = "";
   let realUsage = null;   // fm serve's own usage object, if it sent one
   let sawFinish = false;  // a clean finish_reason or [DONE] arrived
+  // `stop` was withheld from fm serve, so honour it here. A sequence can span two
+  // deltas, so hold back the last (maxStopLen - 1) characters: they are the only ones
+  // that could still be completing a match. Anything held is flushed at end of stream.
+  const stopList = (() => {
+    const raw = stopSequences;
+    const list = typeof raw === "string" ? [raw] : Array.isArray(raw) ? raw : [];
+    return list.filter((sq) => typeof sq === "string" && sq.length > 0);
+  })();
+  const maxStopLen = stopList.reduce((m, sq) => Math.max(m, sq.length), 0);
+  let pendingTail = "";
+  let stopHit = false;
+  const applyStopHoldback = (text) => {
+    if (stopHit) return "";                    // everything after the stop is discarded
+    const full = pendingTail + text;
+    const { text: cut, hit } = truncateAtStop(full, stopList);
+    if (hit) { stopHit = true; pendingTail = ""; return cut; }
+    const hold = Math.min(maxStopLen - 1, full.length);
+    pendingTail = hold > 0 ? full.slice(full.length - hold) : "";
+    return hold > 0 ? full.slice(0, full.length - hold) : full;
+  };
+
   let producedOutput = false; // any content or tool_calls delta seen
   let tFirstToken = null;  // wall-clock of first output delta (TTFT + tok/s)
   let pending = "";       // line buffer across chunk boundaries
@@ -772,15 +817,13 @@ function relayStreamingChat({ res, proxyRes, diag, commit, isCommitted, fail, is
             const delta = ch0 && ch0.delta;
             if (delta && typeof delta.content === "string") {
               if (tFirstToken == null) tFirstToken = Date.now();
-              if (STRIP_MARKERS) {
-                const clean = stripTemplateMarkers(delta.content);
-                if (clean !== delta.content) {
-                  delta.content = clean;
-                  // Same in-place rewrite, and the same function replacement, as the
-                  // held-finish_reason path above: a string replacement would expand
-                  // $& out of the completion text and corrupt the frame.
-                  line = line.replace(payload, () => JSON.stringify(obj));
-                }
+              const original = delta.content;
+              if (STRIP_MARKERS) delta.content = stripTemplateMarkers(delta.content);
+              if (stopList.length) delta.content = applyStopHoldback(delta.content);
+              if (delta.content !== original) {
+                // In-place rewrite with a FUNCTION replacement: a string replacement
+                // would expand $& out of the completion text and corrupt the frame.
+                line = line.replace(payload, () => JSON.stringify(obj));
               }
               // Accumulate what the client actually receives, so the usage fallback
               // counts the relayed text rather than the raw upstream text.
@@ -869,6 +912,18 @@ function relayStreamingChat({ res, proxyRes, diag, commit, isCommitted, fail, is
       diag("EMPTY COMPLETION (finished, no output)",
         `rawTail=${JSON.stringify(rawTail)}`);
     }
+    // Nothing matched a stop sequence, so the held-back tail is real output. Flush it
+    // as its own chunk before the final one, or the client silently loses the last few
+    // characters of every completion.
+    if (pendingTail && !stopHit) {
+      const m0 = lastChunkMeta || {};
+      res.write(`data: ${JSON.stringify({ id: m0.id || "chatcmpl-proxy",
+        object: "chat.completion.chunk", created: m0.created || Math.floor(Date.now() / 1000),
+        model: m0.model || (parsedReq && parsedReq.model) || "system",
+        choices: [{ index: 0, delta: { content: pendingTail } }] })}\n\n`);
+      completionText += pendingTail;
+      pendingTail = "";
+    }
     // Prefer fm serve's real usage. Counting the text ourselves forks `fm`, so it
     // happens only when no usage frame arrived at all (a guardrail abort that never
     // finishes) — never on an ordinary stream.
@@ -942,7 +997,7 @@ function applyLengthFinish(obj, cappedAt) {
 }
 
 function relayNonStreamingChat({ res, proxyRes, diag, fail, isAborting, markCommitted,
-                                 parsedReq, promptTokensFallback, reqStart, cappedAt }) {
+                                 parsedReq, promptTokensFallback, reqStart, cappedAt, stopSequences }) {
 // Non-streaming: buffer fully (so we can still retry), then fix usage.
 let raw = "";
 proxyRes.on("data", (c) => (raw += c));
@@ -975,9 +1030,17 @@ proxyRes.on("end", () => {
   let out = raw;
   if (obj) {
     // fm serve's non-streaming usage is accurate — pass it through untouched.
-    if (STRIP_MARKERS) {
-      const msg = obj.choices && obj.choices[0] && obj.choices[0].message;
-      if (msg && typeof msg.content === "string") msg.content = stripTemplateMarkers(msg.content);
+    const msg = obj.choices && obj.choices[0] && obj.choices[0].message;
+    if (STRIP_MARKERS && msg && typeof msg.content === "string") {
+      msg.content = stripTemplateMarkers(msg.content);
+    }
+    // `stop` was withheld from fm serve (it 400s), so apply it here.
+    if (msg && typeof msg.content === "string" && stopSequences) {
+      const { text, hit } = truncateAtStop(msg.content, stopSequences);
+      if (hit) {
+        msg.content = text;
+        obj.choices[0].finish_reason = "stop";
+      }
     }
     applyLengthFinish(obj, cappedAt);
     out = JSON.stringify(obj);
@@ -1009,7 +1072,7 @@ const server = http.createServer((req, res) => {
     const reqStart = Date.now();
     const ctx = prepareUpstreamRequest(req, body);
     const { fixed, upstreamHeaders, parsedReq, isChat, isStream,
-            clientDeclinedUsage, promptTokensFallback, cappedAt, responseFormatCycle } = ctx;
+            clientDeclinedUsage, promptTokensFallback, cappedAt, responseFormatCycle, stopSequences } = ctx;
 
     // One-line failure diagnostic. Success is not logged.
     const diag = (label, extra = "") =>
@@ -1059,7 +1122,7 @@ const server = http.createServer((req, res) => {
 
           const g = createAttemptGate({ res, proxyRes, proxyReq, plan, attempt, isStream, diag });
           gate = g;
-          const relay = { res, proxyRes, diag, ...g, parsedReq, promptTokensFallback, reqStart, cappedAt };
+          const relay = { res, proxyRes, diag, ...g, parsedReq, promptTokensFallback, reqStart, cappedAt, stopSequences };
           if (isStream) relayStreamingChat({ ...relay, clientDeclinedUsage });
           else relayNonStreamingChat(relay);
         }

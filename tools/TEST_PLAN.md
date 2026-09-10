@@ -52,6 +52,8 @@ a diff:
 - a `developer` message role is rewritten to `system`
 - a `type: ["T","null"]` array collapses to `type: "T"`, in tool params and in
   `response_format`, at every depth
+- `stop` is removed from the forwarded body, on both the streaming and the
+  non-streaming path, and applied by the proxy instead
 
 ## Layer 3 — harness check
 

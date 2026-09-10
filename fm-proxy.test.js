@@ -4,7 +4,7 @@ const assert = require("node:assert");
 const http = require("node:http");
 const { spawn } = require("node:child_process");
 const path = require("node:path");
-const { fixToolSchema, fixTools, fixResponseFormatSchema, findCyclicDefs, classifyError, errorFrame, fmTokenCount, _isLicenseGate, stripTemplateMarkers } = require("./fm-proxy.js");
+const { fixToolSchema, fixTools, fixResponseFormatSchema, findCyclicDefs, classifyError, errorFrame, fmTokenCount, _isLicenseGate, stripTemplateMarkers, truncateAtStop } = require("./fm-proxy.js");
 
 // fm serve decodes nested tool parameters natively at every depth, including
 // array<array<object>>. Verified live: flat schemas, object chains of any depth,
@@ -2044,4 +2044,104 @@ test("response_format: a type array inside $defs collapses after inlining", () =
     $defs: { A: { type: "object", properties: { z: { type: ["string", "null"] } } } },
   });
   assert.deepStrictEqual(fixed.properties.a.properties.z, { type: "string" });
+});
+
+test("truncateAtStop cuts at the earliest sequence and drops it", () => {
+  assert.deepStrictEqual(truncateAtStop("one two three", ["two"]), { text: "one ", hit: true });
+  assert.deepStrictEqual(truncateAtStop("a1b2c", ["2", "1"]), { text: "a", hit: true },
+    "earliest position wins, not first listed");
+  assert.deepStrictEqual(truncateAtStop("hello", "ell"), { text: "h", hit: true },
+    "stop may be a bare string");
+});
+
+test("truncateAtStop leaves text alone when nothing matches", () => {
+  assert.deepStrictEqual(truncateAtStop("hello", ["zzz"]), { text: "hello", hit: false });
+  assert.deepStrictEqual(truncateAtStop("hello", []), { text: "hello", hit: false });
+  assert.deepStrictEqual(truncateAtStop("hello", null), { text: "hello", hit: false });
+  assert.deepStrictEqual(truncateAtStop("hello", [""]), { text: "hello", hit: false },
+    "an empty stop must not truncate everything");
+});
+
+test("stop is stripped from the body forwarded upstream", () => {
+  const { body, parsed, stopSequences } = fixTools(JSON.stringify({
+    model: "system", messages: [{ role: "user", content: "hi" }], stop: ["X"],
+  }));
+  assert.deepStrictEqual(stopSequences, ["X"], "returned separately for the relay");
+  assert.strictEqual("stop" in JSON.parse(body), false, "fm serve 400s on stop");
+  assert.strictEqual(parsed.stop, undefined,
+    "must NOT be re-attached: callers re-serialise parsed and would forward it again");
+});
+
+test("non-streaming: content is truncated at the stop sequence", async (t) => {
+  const stack = await startStack({
+    handler: (req, parsed, res) => {
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify({ id: "x", object: "chat.completion", model: "system",
+        choices: [{ index: 0, message: { role: "assistant", content: "one two three" }, finish_reason: "stop" }],
+        usage: { prompt_tokens: 1, completion_tokens: 3, total_tokens: 4 } }));
+    },
+  });
+  t.after(() => stack.stop());
+  const r = await request(stack.proxyPort,
+    { method: "POST", path: "/v1/chat/completions", headers: { "content-type": "application/json" } },
+    JSON.stringify({ model: "system", stream: false, stop: ["two"], messages: [{ role: "user", content: "x" }] }));
+  const j = JSON.parse(r.body);
+  assert.strictEqual(j.choices[0].message.content, "one ");
+  assert.strictEqual(j.choices[0].finish_reason, "stop");
+  assert.strictEqual(stack.getLastBody().stop, undefined, "stop must not reach fm serve");
+});
+
+test("streaming: stop truncates, even split across two deltas", async (t) => {
+  const stack = await startStack({
+    handler: (req, parsed, res) => {
+      res.writeHead(200, { "content-type": "text/event-stream" });
+      const chunk = (d) => res.write(`data: ${JSON.stringify(d)}\n\n`);
+      // "STOP" arrives as "ST" + "OP": a per-delta search would never see it.
+      chunk({ id: "x", object: "chat.completion.chunk", model: "system",
+              choices: [{ index: 0, delta: { content: "keep ST" } }] });
+      chunk({ id: "x", object: "chat.completion.chunk", model: "system",
+              choices: [{ index: 0, delta: { content: "OP drop this" } }] });
+      chunk({ id: "x", object: "chat.completion.chunk", model: "system",
+              choices: [{ index: 0, delta: {}, finish_reason: "stop" }] });
+      res.write("data: [DONE]\n\n");
+      res.end();
+    },
+  });
+  t.after(() => stack.stop());
+  const r = await request(stack.proxyPort,
+    { method: "POST", path: "/v1/chat/completions", headers: { "content-type": "application/json" } },
+    JSON.stringify({ model: "system", stream: true, stop: ["STOP"], messages: [{ role: "user", content: "x" }] }));
+  let text = "";
+  for (const line of r.body.split("\n")) {
+    if (!line.startsWith("data: ") || line.includes("[DONE]")) continue;
+    const d = JSON.parse(line.slice(6)).choices?.[0]?.delta;
+    if (d && typeof d.content === "string") text += d.content;
+  }
+  assert.strictEqual(text, "keep ", "stop must cut across the delta boundary");
+});
+
+test("streaming: text before a never-matched stop is still delivered whole", async (t) => {
+  const stack = await startStack({
+    handler: (req, parsed, res) => {
+      res.writeHead(200, { "content-type": "text/event-stream" });
+      const chunk = (d) => res.write(`data: ${JSON.stringify(d)}\n\n`);
+      chunk({ id: "x", object: "chat.completion.chunk", model: "system",
+              choices: [{ index: 0, delta: { content: "alpha" } }] });
+      chunk({ id: "x", object: "chat.completion.chunk", model: "system",
+              choices: [{ index: 0, delta: { content: "beta" }, finish_reason: "stop" }] });
+      res.write("data: [DONE]\n\n");
+      res.end();
+    },
+  });
+  t.after(() => stack.stop());
+  const r = await request(stack.proxyPort,
+    { method: "POST", path: "/v1/chat/completions", headers: { "content-type": "application/json" } },
+    JSON.stringify({ model: "system", stream: true, stop: ["ZZZZ"], messages: [{ role: "user", content: "x" }] }));
+  let text = "";
+  for (const line of r.body.split("\n")) {
+    if (!line.startsWith("data: ") || line.includes("[DONE]")) continue;
+    const d = JSON.parse(line.slice(6)).choices?.[0]?.delta;
+    if (d && typeof d.content === "string") text += d.content;
+  }
+  assert.strictEqual(text, "alphabeta", "nothing may be swallowed by the hold-back");
 });
