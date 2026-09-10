@@ -226,9 +226,11 @@ The leak needs `tools`. The same prompt without them leaked 0 of 4 times, and an
 unrelated prompt leaked 0 of 4 times. Underneath the markers the model emits a correct
 call: `<start_of_turn>model\n{"tool_call": [{"name": "get_weather", ...`.
 
-Beta 7 and Beta 8 recorded clean JSON here. The leak is intermittent, so it is either new
-in the RC or it was missed earlier. Send at least 10 requests before calling this clean
-on any build.
+The Beta 7 and Beta 8 audits saw no markers here. Their samples were too small. They
+missed the leak. The leak is not new in the RC. The clean-room reimplementation records
+the markers on Beta 7. The evidence is the header comment of its `fm-proxy.js`, line 20,
+committed 2026-08-18. It names `<ctrl46>` and `<start_of_turn>` in `content`. The leak is
+intermittent. Send at least 10 requests before you call a build clean.
 
 Stripping is opt-in. Set `FM_STRIP_TEMPLATE_MARKERS=1` and the proxy removes the markers
 from `content` on both paths. It is off by default for two reasons: the proxy otherwise
@@ -288,10 +290,10 @@ authoritative for what is true now.
 | Beta 6 `26A5416b` | 2.0.68.1.401 | Rebuilt binary, identical CLI surface. No behaviour change. |
 | Beta 7 `26A5421a` | 2.0.68.1.402 | **PCC removed from the binary**, with `fm quota-usage`. Non-cyclic `$defs` fixed. `array<array<object>>` accepted. Titled strings began requiring an `enum`. Audit fixed two proxy hazards in `57f26d3`: a forwarded cyclic schema, and a retried terminal 400. |
 | Beta 8 `26A5425a` | 2.0.68.1.402 | Rebuilt binary, identical CLI surface. No behaviour change. Audit fixed a proxy bug: a capped stream emitted two `finish_reason` values. |
-| RC `26A428` | 2.0.68.1.402 | Rebuilt binary, identical CLI surface. Tool-call content began leaking template markers. |
+| RC `26A428` | 2.0.68.1.402 | Rebuilt binary, identical CLI surface. The RC audit found the tool-call marker leak. A clean-room record shows Beta 7 leaked too. |
 
 Three builds now share `fm` 2.0.68.1.402 and produce a byte-identical help tree, so only
-the binary's mtime distinguishes them. The RC changed behaviour anyway. Audit both layers
+the binary's mtime distinguishes them. The help tree does not show behaviour. Audit both layers
 after any OS update.
 
 ### Vision: how the on-device model encodes images
@@ -367,8 +369,20 @@ streaming chat, streaming usage relay, `stream`-omitted → JSON, structured out
   whole `tool_calls` array regardless of what they requested). Treated the same as
   `n > 1`: a real fm serve gap, documented rather than faked.
   (Unlike `n > 1`, `parallel_tool_calls` is still accepted silently rather than 400'd.)
-- Sampling params (`temperature`, `top_p`, `stop`, …) are passed through as-is; whatever
+- The clean-room REPORT.md, item R6, is wrong. It claims `parallel_tool_calls` returns
+  400. fm serve returns 200 and silently ignores the field. Live probes on the 27.0 RC
+  confirmed this.
+- `stop` is withheld from `fm serve`, which 400s on it, and applied by the proxy. Other
+  sampling params (`temperature`, `top_p`, …) are passed through as-is; whatever
   `fm serve` supports applies.
+- fm serve accepts `logprobs` and `top_logprobs` and ignores them. No logprob data
+  exists to synthesize, so the proxy returns none.
+- A union of two real types has no single form in the fm schema subset. The behaviour
+  depends on how the client spells it. A `type` array, such as `["string","number"]`,
+  collapses to its first member on both paths. An `anyOf` union collapses on the tool
+  path, but the `response_format` path forwards it and fm serve returns a 400. Every
+  collapse is lossy.
+- The proxy does not decompress a gzip request body. No chat client sends one.
 
 > Implementation note: the proxy buffers each request body and sets its own
 > `Content-Length`, stripping any inbound/upstream `Transfer-Encoding` so a client that

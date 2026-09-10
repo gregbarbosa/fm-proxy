@@ -49,6 +49,12 @@ a diff:
 - a `$ref` tool parameter arrives resolved, not as `{}`
 - a `$defs` response schema arrives inlined, with no `$defs`
 - a **cyclic** `$defs` schema keeps `$defs` and gains the dialect
+- a `developer` message role is rewritten to `system`
+- a `type: ["T","null"]` array collapses to `type: "T"`, in tool params and in
+  `response_format`, at every depth
+- `stop` is removed from the forwarded body, on both the streaming and the
+  non-streaming path, and applied by the proxy instead
+- `reasoning_effort` is removed from the forwarded body
 
 ## Layer 3 — harness check
 
