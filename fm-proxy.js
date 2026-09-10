@@ -368,6 +368,13 @@ function fixResponseFormatSchema(schema) {
 function fixTools(body) {
   try {
     const parsed = JSON.parse(body);
+    // fm serve rejects the `developer` role with a 400 that names nothing useful
+    // ("Invalid JSON: The data couldn't be read because it isn't in the correct
+    // format."). OpenAI introduced `developer` as the successor to `system` and its
+    // own SDKs emit it, so map it rather than let an ordinary client fail.
+    if (Array.isArray(parsed.messages)) {
+      for (const m of parsed.messages) if (m && m.role === "developer") m.role = "system";
+    }
     if (parsed.tools) {
       parsed.tools = parsed.tools.map((tool) => {
         const schema = fixToolSchema(tool.function?.parameters);

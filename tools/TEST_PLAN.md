@@ -49,6 +49,7 @@ a diff:
 - a `$ref` tool parameter arrives resolved, not as `{}`
 - a `$defs` response schema arrives inlined, with no `$defs`
 - a **cyclic** `$defs` schema keeps `$defs` and gains the dialect
+- a `developer` message role is rewritten to `system`
 
 ## Layer 3 — harness check
 

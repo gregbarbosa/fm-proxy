@@ -1981,3 +1981,23 @@ test("streaming: markers survive by default", async (t) => {
   const r = await chat(stack, { stream: true });
   assert.ok(r.body.includes("<ctrl46>ok"), "default must not filter content");
 });
+
+// ── harvested from the clean-room rebuild ───────────────────────────────────
+// A parallel implementation probed fm serve from a brief and found deviations this
+// proxy did not correct. Each was re-verified live against the 27.0 RC before the fix.
+
+test("developer role is mapped to system (fm serve 400s on developer)", () => {
+  const { body } = fixTools(JSON.stringify({ model: "system", messages: [
+    { role: "developer", content: "Be terse." },
+    { role: "user", content: "hi" },
+  ] }));
+  const msgs = JSON.parse(body).messages;
+  assert.strictEqual(msgs[0].role, "system", "developer must become system");
+  assert.strictEqual(msgs[0].content, "Be terse.", "content must survive");
+  assert.strictEqual(msgs[1].role, "user", "other roles untouched");
+});
+
+test("a request with no messages is left alone", () => {
+  const { body } = fixTools(JSON.stringify({ model: "system" }));
+  assert.strictEqual(JSON.parse(body).model, "system");
+});
