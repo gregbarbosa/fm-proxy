@@ -807,22 +807,22 @@ function relayStreamingChat({ res, proxyRes, diag, commit, isCommitted, fail, is
       diag("EMPTY COMPLETION (finished, no output)",
         `rawTail=${JSON.stringify(rawTail)}`);
     }
-    const completionTokens = countCompletionTokens(completionText);
-    // Throughput: generation time is first-token → now; TTFT is request → first-token.
-    const nowEnd = Date.now();
-    logToks(
-      (parsedReq && parsedReq.model) || "unknown", "stream", completionTokens,
-      tFirstToken != null ? nowEnd - tFirstToken : nowEnd - reqStart,
-      tFirstToken != null ? tFirstToken - reqStart : null,
-    );
-    // Prefer fm serve's real usage over the completionText estimate; the estimate
-    // only fires when no usage frame arrives at all (e.g. a guardrail abort that
-    // never finishes).
+    // Prefer fm serve's real usage. Counting the text ourselves forks `fm`, so it
+    // happens only when no usage frame arrived at all (a guardrail abort that never
+    // finishes) — never on an ordinary stream.
     let usage = realUsage;
     if (!usage) {
       const pt = promptTokensFallback();
-      usage = { prompt_tokens: pt, completion_tokens: completionTokens, total_tokens: pt + completionTokens };
+      const ct = countCompletionTokens(completionText);
+      usage = { prompt_tokens: pt, completion_tokens: ct, total_tokens: pt + ct };
     }
+    // Throughput: generation time is first-token → now; TTFT is request → first-token.
+    const nowEnd = Date.now();
+    logToks(
+      (parsedReq && parsedReq.model) || "unknown", "stream", Number(usage.completion_tokens) || 0,
+      tFirstToken != null ? nowEnd - tFirstToken : nowEnd - reqStart,
+      tFirstToken != null ? tFirstToken - reqStart : null,
+    );
     const meta = lastChunkMeta || {};
     // Same truncation mislabel as the non-streaming path: fm serve says "stop" even when
     // it stopped at the cap. Only rewrite a plain stop — never an abort's content_filter.
