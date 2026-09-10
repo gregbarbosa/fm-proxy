@@ -2001,3 +2001,47 @@ test("a request with no messages is left alone", () => {
   const { body } = fixTools(JSON.stringify({ model: "system" }));
   assert.strictEqual(JSON.parse(body).model, "system");
 });
+
+test("tool params: a nullable type array collapses to the real type", () => {
+  const out = fixToolSchema({ type: "object", required: ["a", "b"], properties: {
+    a: { type: ["string", "null"] },
+    b: { type: ["null", "number"] },
+  } });
+  assert.deepStrictEqual(out.properties.a, { type: "string" });
+  assert.deepStrictEqual(out.properties.b, { type: "number" });
+});
+
+test("tool params: a real union takes the first type, as anyOf already does", () => {
+  const out = fixToolSchema({ type: "object", required: ["a"], properties: {
+    a: { type: ["string", "number"] },
+  } });
+  assert.deepStrictEqual(out.properties.a, { type: "string" });
+});
+
+test("tool params: a type array is collapsed inside array items too", () => {
+  const out = fixToolSchema({ type: "object", required: ["a"], properties: {
+    a: { type: "array", items: { type: ["string", "null"] } },
+  } });
+  assert.deepStrictEqual(out.properties.a.items, { type: "string" });
+});
+
+test("response_format: type arrays collapse at every depth", () => {
+  const fixed = fixResponseFormatSchema({
+    type: "object", required: ["a", "nested"], properties: {
+      a: { type: ["string", "null"] },
+      nested: { type: "object", properties: { b: { type: ["number", "null"] } } },
+      list: { type: "array", items: { type: ["boolean", "null"] } },
+    },
+  });
+  assert.deepStrictEqual(fixed.properties.a, { type: "string" });
+  assert.deepStrictEqual(fixed.properties.nested.properties.b, { type: "number" });
+  assert.deepStrictEqual(fixed.properties.list.items, { type: "boolean" });
+});
+
+test("response_format: a type array inside $defs collapses after inlining", () => {
+  const fixed = fixResponseFormatSchema({
+    type: "object", required: ["a"], properties: { a: { $ref: "#/$defs/A" } },
+    $defs: { A: { type: "object", properties: { z: { type: ["string", "null"] } } } },
+  });
+  assert.deepStrictEqual(fixed.properties.a.properties.z, { type: "string" });
+});

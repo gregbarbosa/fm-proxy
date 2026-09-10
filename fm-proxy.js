@@ -181,8 +181,23 @@ function flattenComposite(prop, key, mergeAll) {
   return simplifyProperty(merged);
 }
 
+// JSON Schema lets `type` be an array. fm serve rejects that outright, and it is what
+// zod's .nullable() and pydantic's Optional[] emit, so an ordinary generated schema 400s
+// on both the tool and the response_format path.
+//
+// Collapse to the first non-null member, matching what flattenComposite already does
+// with an anyOf union. Dropping "null" loses nothing fm serve could express. A genuine
+// union like ["string","number"] also collapses to its first member, which is lossy, but
+// it is the same trade the anyOf path already makes and it beats a 400.
+function collapseTypeArray(node) {
+  if (!node || typeof node !== "object" || !Array.isArray(node.type)) return node;
+  const real = node.type.find((t) => t !== "null") || "string";
+  return { ...node, type: real };
+}
+
 function simplifyProperty(prop) {
   if (!prop || typeof prop !== "object") return prop;
+  prop = collapseTypeArray(prop);
 
   // Collapse composition keywords to a single schema.
   if (prop.anyOf) return flattenComposite(prop, "anyOf", false);
@@ -356,12 +371,29 @@ function findCyclicDefs(schema) {
 // Inline the $refs, or fall back to dialect injection when the schema cannot be
 // inlined. A cyclic schema never reaches here in production — fixTools rejects it
 // first — so the fallback is defence in depth for direct callers.
+// Walk a response_format schema and collapse every `type` array in place. Unlike a tool
+// schema this one is not otherwise simplified: fm serve decodes nested objects here
+// natively, so only the shapes it rejects are repaired.
+function collapseTypeArraysDeep(node) {
+  if (Array.isArray(node)) { node.forEach(collapseTypeArraysDeep); return node; }
+  if (!node || typeof node !== "object") return node;
+  if (Array.isArray(node.type)) node.type = node.type.find((t) => t !== "null") || "string";
+  for (const key of ["properties", "$defs", "definitions"]) {
+    if (node[key] && typeof node[key] === "object") {
+      for (const sub of Object.values(node[key])) collapseTypeArraysDeep(sub);
+    }
+  }
+  if (node.items) collapseTypeArraysDeep(node.items);
+  return node;
+}
+
 function fixResponseFormatSchema(schema) {
-  if (!schema || typeof schema !== "object" || !schema.$defs) return schema;
+  if (!schema || typeof schema !== "object") return schema;
+  if (!schema.$defs) return collapseTypeArraysDeep(schema);
   const inlined = inlineDefs(schema);
-  if (inlined) return inlined;
+  if (inlined) return collapseTypeArraysDeep(inlined);
   for (const [name, def] of Object.entries(schema.$defs)) decorateDialect(def, name);
-  return schema;
+  return collapseTypeArraysDeep(schema);
 }
 
 // Rewrite tools into fm-serve-compatible schemas; returns body and parsed req.

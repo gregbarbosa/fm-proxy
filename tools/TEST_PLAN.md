@@ -50,6 +50,8 @@ a diff:
 - a `$defs` response schema arrives inlined, with no `$defs`
 - a **cyclic** `$defs` schema keeps `$defs` and gains the dialect
 - a `developer` message role is rewritten to `system`
+- a `type: ["T","null"]` array collapses to `type: "T"`, in tool params and in
+  `response_format`, at every depth
 
 ## Layer 3 — harness check
 

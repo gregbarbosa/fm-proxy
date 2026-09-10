@@ -80,6 +80,8 @@ const TOOL = { type: "function", function: { name: "get_weather", description: "
 const TOOL_NODESC = { type: "function", function: { name: "get_weather", parameters: { type: "object", properties: { city: { type: "string" } }, required: ["city"] } } };
 const TOOL_REF = { type: "function", function: { name: "set_home", description: "Set home", parameters: { type: "object", properties: { home: { $ref: "#/$defs/Address" } }, required: ["home"], $defs: { Address: { type: "object", properties: { city: { type: "string" } }, required: ["city"] } } } } };
 const TOOL_GRID = { type: "function", function: { name: "grid", description: "Grid", parameters: { type: "object", properties: { g: { type: "array", items: { type: "array", items: { type: "object", properties: { x: { type: "number" } } } } } } } } };
+const TOOL_NULLABLE = { type: "function", function: { name: "note", description: "Note", parameters: { type: "object", properties: { city: { type: "string" }, note: { type: ["string", "null"] } }, required: ["city", "note"] } } };
+const RF_NULLABLE = { type: "json_schema", json_schema: { name: "N", schema: { type: "object", properties: { a: { type: ["string", "null"] }, list: { type: "array", items: { type: ["number", "null"] } } }, required: ["a"] } } };
 const RF_DEFS = { type: "json_schema", json_schema: { name: "P", schema: { type: "object", properties: { name: { type: "string" }, address: { $ref: "#/$defs/A" } }, required: ["name", "address"], $defs: { A: { type: "object", properties: { street: { type: "string" } }, required: ["street"] } } } } };
 const RF_CYCLE = { type: "json_schema", json_schema: { name: "N", schema: { type: "object", properties: { root: { $ref: "#/$defs/Node" } }, $defs: { Node: { type: "object", properties: { child: { $ref: "#/$defs/Node" } } } } } } };
 const M = [{ role: "user", content: "Say hi" }];
@@ -91,6 +93,8 @@ const CASES = [
   ["stream true, usage declined", { model: "system", messages: M, max_tokens: 10, stream: true, stream_options: { include_usage: false } }],
   ["system message", { model: "system", messages: [{ role: "system", content: "Be brief." }, ...M], max_tokens: 10, stream: false }],
   ["developer message", { model: "system", messages: [{ role: "developer", content: "Be brief." }, ...M], max_tokens: 10, stream: false }],
+  ["tool with nullable param", { model: "system", messages: M, max_tokens: 10, stream: false, tools: [TOOL_NULLABLE] }],
+  ["response_format nullable types", { model: "system", messages: M, max_tokens: 10, stream: false, response_format: RF_NULLABLE }],
   ["multi turn", { model: "system", messages: [{ role: "user", content: "a" }, { role: "assistant", content: "b" }, { role: "user", content: "c" }], max_tokens: 10, stream: false }],
   ["tool basic", { model: "system", messages: M, tools: [TOOL], max_tokens: 10, stream: false }],
   ["tool missing description", { model: "system", messages: M, tools: [TOOL_NODESC], max_tokens: 10, stream: false }],
