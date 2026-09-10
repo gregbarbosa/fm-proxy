@@ -2,12 +2,10 @@
 // fm-proxy.js — OpenAI-compatible front for Apple's `fm serve`.
 // Proxies http://127.0.0.1:1977 -> http://127.0.0.1:1976 (node fm-proxy.js)
 //
-// fm serve's JSON Schema limits for tool parameters: root `required` must be
-// present; no anyOf/allOf/oneOf/if-then-else/not/patternProperties. Nested objects
-// decode natively at any depth, array<array<object>> included (Beta 7; earlier betas
-// needed a JSON-string round-trip for that one shape, removed with their support).
-// $ref/$defs are inlined first (tool parameters and response_format) — fm serve
-// understands neither.
+// fm serve's JSON Schema limits for tool parameters: the root `required` must be
+// present, and anyOf/allOf/oneOf/if-then-else/not/patternProperties are all rejected.
+// Nested objects decode natively at any depth. $ref and $defs are inlined first, in
+// both tool parameters and response_format, because fm serve understands neither.
 
 const http = require("http");
 const { execFileSync } = require("child_process");
@@ -63,8 +61,6 @@ function splitMessages(messages) {
 // Memoized and bounded — each call forks `fm` synchronously, heavy inputs repeat.
 const _tokenCache = new Map();
 const _TOKEN_CACHE_MAX = 512;
-// No fallback probe for the pre-Beta-4 `token-count` spelling — a probe spawns `fm`
-// twice per count and cannot succeed on a supported build anyway.
 const TOKEN_SUBCOMMAND = "count-tokens";
 // The CLI has a machine-wide legal-notice gate: until a privileged user runs
 // `sudo fm license`, every subcommand exits 69 and prints a banner to stderr.
@@ -211,7 +207,7 @@ function simplifyProperty(prop) {
 
 // True if `prop` bottoms out in an object through any number of array wrappers.
 // Flatten a tool's parameter schema into what fm serve decodes. Every nesting depth
-// passes through natively on Beta 7, so this only strips unsupported keywords and
+// passes through natively, so this only strips unsupported keywords and
 // preserves `required`.
 function fixToolSchema(schema) {
   const result = { type: "object", required: [] };
@@ -222,7 +218,7 @@ function fixToolSchema(schema) {
 
   // Resolve $refs first: simplifyProperty strips $ref/$defs, flattening a referenced
   // param to `{}` — the shape pydantic/zod emit for named types. Inlining gives fm
-  // serve the nesting it decodes natively; cyclic refs keep the old behaviour.
+  // serve the nesting it decodes natively.
   if (schema.$defs) schema = inlineDefs(schema) || schema;
 
   result.properties = {};
@@ -238,11 +234,13 @@ function fixToolSchema(schema) {
 }
 
 // ── response_format schema dialect (structured output) ──────────────────────
-// fm serve's dialect needs title + x-order + required + additionalProperties on
-// every object reached through `$defs`; a missing key 400s naming it. Inline-nested
-// objects need none, so inlining (below) is primary; this survives for cyclic refs.
-// Re-verify: undecorated $defs → 400. A cyclic $defs is rejected before this point
-// (findCyclicDefs) because forwarding one hangs fm serve permanently.
+// Strategy for the whole section: inline every $ref and drop $defs, so fm serve never
+// sees a construct it does not understand. Dialect injection is the fallback for the
+// schemas that cannot be inlined.
+//
+// The dialect is title + x-order + required + additionalProperties on every object
+// reached through `$defs`; a missing key returns 400 naming it. Objects reached by
+// inline nesting need none, which is why inlining is primary.
 function isDialectObjectSchema(s) {
   return !!(s && typeof s === "object" && (s.type === "object" || s.properties));
 }
@@ -298,15 +296,13 @@ function inlineDefs(schema) {
   return bailed ? null : result;
 }
 
-// Detect a cycle in the $defs reference graph: a definition that reaches itself
-// through $refs, directly or transitively. Returns the name of the first cyclic
-// definition, or null when the graph is acyclic. Forwarding a cyclic $defs to
-// fm serve HANGS it permanently (Beta 7 — verified live: a definition whose only
-// property is the recursive $ref, with no other required property; every later
-// request hangs too until a restart), and recursion has no finite inline form —
-// so such schemas must be rejected with a client error naming the definition,
-// never forwarded. (Cycles that carry an extra required scalar happen to return
-// 200 today, but that is an undocumented parser quirk — not something to bet on.)
+// Detect a definition that reaches itself through $refs, directly or transitively.
+// Returns the first cyclic definition's name, or null when the graph is acyclic.
+//
+// Forwarding a cyclic $defs hangs fm serve permanently, and every later request hangs
+// with it until a restart. Recursion has no finite inline form, so these must be
+// rejected rather than repaired. A cycle carrying an extra required scalar happens to
+// return 200 today, but that is an undocumented parser quirk — do not bet on it.
 function findCyclicDefs(schema) {
   const defs = schema && schema.$defs;
   if (!defs || typeof defs !== "object") return null;
@@ -341,13 +337,9 @@ function findCyclicDefs(schema) {
   return null;
 }
 
-// Normalise a response_format schema: inline $refs and drop $defs (avoids both the
-// 400 for missing dialect keys and the Beta-5 hang when present). Unresolvable refs
-// fall back to dialect injection above. Cyclic schemas never get here in production:
-// fixTools rejects them via findCyclicDefs before this is called (they cannot be
-// inlined — recursion has no finite inline form — and forwarding them hangs fm
-// serve; see the request-handler guard). The cyclic fallback below survives only
-// for direct callers and as defence in depth.
+// Inline the $refs, or fall back to dialect injection when the schema cannot be
+// inlined. A cyclic schema never reaches here in production — fixTools rejects it
+// first — so the fallback is defence in depth for direct callers.
 function fixResponseFormatSchema(schema) {
   if (!schema || typeof schema !== "object" || !schema.$defs) return schema;
   const inlined = inlineDefs(schema);
@@ -385,7 +377,7 @@ function fixTools(body) {
       if (js && js.schema) {
         // A cyclic $defs cannot be inlined (recursion has no finite inline form) and
         // forwarding it to fm serve HANGS the server permanently — every later request
-        // hangs too, until a restart (Beta 7). Reject the request with a client error
+        // hangs too, until a restart. Reject the request with a client error
         // naming the offending definition instead (see findCyclicDefs; the request
         // handler answers 400 before any upstream connection is made).
         const cyclic = findCyclicDefs(js.schema);
@@ -552,8 +544,8 @@ function createRetryPlan(res, diag, fire) {
 }
 
 // ── Per-request preparation ─────────────────────────────────────────────────
-// Build the upstream payload + context: fixTools rewrites, stream fixups,
-// map, assembled-size instrumentation. Logs once per request.
+// Build the upstream payload and the per-request context: schema rewrites, stream
+// fixups, header scrubbing, and the lazy token-count fallback.
 function prepareUpstreamRequest(req, body) {
   const { body: toolFixed, parsed: parsedReq, responseFormatCycle } = fixTools(body);
 
@@ -949,12 +941,12 @@ const server = http.createServer((req, res) => {
     const { fixed, upstreamHeaders, parsedReq, isChat, isStream,
             clientDeclinedUsage, promptTokensFallback, cappedAt, responseFormatCycle } = ctx;
 
-    // One-line diagnostic binding a failure to this request's assembled size.
+    // One-line failure diagnostic. Success is not logged.
     const diag = (label, extra = "") =>
       console.error(`[fm-proxy] *** ${label} ***` + (extra ? ` ${extra}` : ""));
 
     // A cyclic $defs in response_format would hang fm serve PERMANENTLY — only a
-    // restart clears it, and every later request hangs too (Beta 7). Reject it here,
+    // restart clears it, and every later request hangs too. Reject it here,
     // before any upstream connection: a clear 400 invalid_request_error naming the
     // offending definition, so the client can fix the schema instead of poisoning
     // the server.

@@ -59,11 +59,11 @@ test("framing constants reproduce fm serve's prompt_tokens exactly", (t) => {
   );
 });
 
-// ── Beta 5 legal-notice gate ─────────────────────────────────────────────────
-// macOS 27 Beta 5 (fm 2.0.68) gates every subcommand behind `sudo fm license`,
-// exiting 69 with a banner on stderr. That is permanent, not transient, so the
-// proxy must latch it rather than re-probe both subcommand names per count.
-test("_isLicenseGate recognises the Beta 5 gate (exit 69 + banner)", () => {
+// ── legal-notice gate ───────────────────────────────────────────────────────
+// The CLI gates every subcommand behind `sudo fm license`, exiting 69 with a banner
+// on stderr. That is permanent, not transient, so the proxy latches it rather than
+// re-probing per count.
+test("_isLicenseGate recognises the licence gate (exit 69 + banner)", () => {
   assert.strictEqual(
     _isLicenseGate({ status: 69, stderr: "YOU HAVE NOT AGREED TO THE APPLE FOUNDATION MODELS CLI LEGAL NOTICE & TERMS.\n" }),
     true,
@@ -183,7 +183,7 @@ test("object -> array -> object passes through natively (the array resets the ob
   assert.strictEqual(schema.properties.order.properties.items.items.type, "object");
 });
 
-test("array<array<object>> passes through natively (Beta 7 decodes it; earlier betas needed a round-trip)", () => {
+test("array<array<object>> passes through natively", () => {
   const schema = fixToolSchema({
     properties: {
       grid: { type: "array", items: { type: "array", items: { type: "object", properties: { x: { type: "number" } } } } },
@@ -926,7 +926,7 @@ test("classifyError: LanguageModelError -1 is a retryable rate-limit", () => {
 // That wording matches no other branch, so before it was handled it fell through to
 // the retryable default and burned the whole backoff ladder. It is terminal, and —
 // unlike the Beta 3/4 signature — it needs no request context to be recognised.
-test("classifyError: Beta 5's 'unsupported generation guide' is terminal without request context", () => {
+test("classifyError: 'unsupported generation guide' is terminal without request context", () => {
   const c = classifyError("An unsupported generation guide was used.");
   assert.strictEqual(c.type, "invalid_request_error");
   assert.strictEqual(c.code, "tool_choice_unsupported");
@@ -953,7 +953,7 @@ test("classifyError: called without a parsedReq argument (backward compatible) s
   assert.strictEqual(classifyError("LanguageModelError -1").type, "rate_limit_exceeded");
 });
 
-test("classifyError: 'Failed to parse generated content' (new in Beta 4) is deterministic — no retry", () => {
+test("classifyError: 'Failed to parse generated content' is deterministic — no retry", () => {
   // Beta 4's stricter tool-call parser rejects malformed generated arguments with
   // this message. Verified live to be deterministic for a given request (5/5
   // identical failures) — retrying burned ~35s through the full backoff ladder
