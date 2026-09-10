@@ -155,7 +155,8 @@ print(client.chat.completions.create(
   --health-timeout <ms>  wait for fm serve      (default 20000)
 ```
 
-`FM_PORT` and `PROXY_PORT` replace the two port options.
+`FM_PORT`, `PROXY_PORT`, and `FM_BIN` replace the matching options. The proxy reads
+`FM_BIN` too, for the `fm count-tokens` fallback.
 
 Run the tests with `node --test`.
 

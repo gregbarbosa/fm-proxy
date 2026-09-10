@@ -13,6 +13,9 @@ const http = require("http");
 const { execFileSync } = require("child_process");
 const FM_PORT = Number(process.env.FM_PORT) || 1976;
 const PROXY_PORT = Number(process.env.PROXY_PORT) || 1977;
+// Matches fm-launch.sh's --fm-bin/FM_BIN. Point it at a path that does not exist to
+// force the heuristic token count, which is what makes a test run deterministic.
+const FM_BIN = process.env.FM_BIN || "/usr/bin/fm";
 
 // fm serve has DISTINCT failure modes this proxy must not conflate (see
 // classifyError): transient rate-limits are retried with backoff; safety-guardrail
@@ -83,7 +86,7 @@ function fmTokenCount(text, instructions) {
   try {
     const args = [TOKEN_SUBCOMMAND, "-q"];
     if (instructions) args.push("-i", instructions);
-    const out = execFileSync("/usr/bin/fm", args, {
+    const out = execFileSync(FM_BIN, args, {
       input: text || "",
       encoding: "utf8",
       timeout: 5000,
