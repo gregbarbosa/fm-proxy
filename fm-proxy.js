@@ -979,7 +979,10 @@ const server = http.createServer((req, res) => {
         },
         (proxyRes) => {
           proxyRes.setEncoding("utf8"); // same multibyte-safety as the request side
-          if (isChat) diag(`UPSTREAM RESPONSE HTTP ${proxyRes.statusCode}`);
+          // Log the status only when it is not a success. A line per healthy request
+          // is noise the operator has to filter back out.
+          if (isChat && proxyRes.statusCode >= 400)
+            diag(`UPSTREAM RESPONSE HTTP ${proxyRes.statusCode}`);
           proxyRes.on("error", (e) => { if (isChat) diag("UPSTREAM RES SOCKET ERROR", `— ${e.message}`); });
 
           // Only intervene on chat completions; everything else passes through.

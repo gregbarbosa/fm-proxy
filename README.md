@@ -149,15 +149,13 @@ print(client.chat.completions.create(
 
 ```
 ./fm-launch.sh [options]
-  -v, --verbose          show per-request [assembled] telemetry
   --fm-port <n>          fm serve port          (default 1976)
   --proxy-port <n>       proxy port for clients (default 1977)
   --fm-bin <path>        fm binary              (default /usr/bin/fm)
   --health-timeout <ms>  wait for fm serve      (default 20000)
 ```
 
-`FM_PORT` and `PROXY_PORT` replace the two port options. Errors and the `[toks]`
-throughput counter print without `--verbose`.
+`FM_PORT` and `PROXY_PORT` replace the two port options.
 
 Run the tests with `node --test`.
 
