@@ -8,7 +8,8 @@
 
 **`fm-proxy.js`** sits in front of Apple's `fm serve` and speaks the OpenAI Chat
 Completions dialect, so an ordinary OpenAI client works against the on-device model
-without code changes. It supports **Beta 7 only**; code for earlier betas is removed.
+without code changes. It supports **Beta 7 and later, including the 27.0 RC**; code for
+earlier betas is removed.
 
 An earlier in-process Swift `fms` app was explored and dropped: it could not run
 inference on Private Cloud Compute, which needed the Apple-private entitlement
@@ -34,13 +35,13 @@ version is on disk, so regenerate rather than hand-editing.
 `fm --version` does **not** exist (errors "Unknown option"). To detect when Apple ships a
 new `fm`/FoundationModels build across macOS betas, fingerprint the binary:
 
-| What | How | Beta 2 value | Beta 3 value | Beta 4 value | Beta 5 value | Beta 6 value | Beta 7 value | Beta 8 value |
-|---|---|---|---|---|---|---|---|---|
-| fm source version | `otool -l /usr/bin/fm \| grep -A2 LC_SOURCE_VERSION` | `2.0.55.1.402` | `2.0.59` | `2.0.62.1.402` | `2.0.68.1.401` | `2.0.68.1.401` | `2.0.68.1.402` | `2.0.68.1.402` |
-| Framework version | `plutil -p /System/Library/Frameworks/FoundationModels.framework/Resources/Info.plist \| grep CFBundleVersion` | `2.0.55.1.402` | `2.0.59` | `2.0.62.1.402` | `2.0.68.1.401` | `2.0.68.1.401` | `2.0.68.1.402` | `2.0.68.1.402` |
-| Runtime version | `codesign -dvvv /usr/bin/fm` → `Runtime Version=` | `27.0.0` | `27.0.0` | `27.0.0` | `27.0.0` | `27.0.0` | `27.0.0` | `27.0.0` |
-| Rebuild date | `ls -la /usr/bin/fm` (mtime) | Jun 19 2026 | Jul 3 2026 | Jul 17 2026 | Aug 7 2026 | Aug 14 2026 | Aug 21 2026 | Aug 27 2026 |
-| macOS build | `sw_vers` → `BuildVersion` | `26A5368g` (27.0 Beta 2) | `26A5378j` (27.0 Beta 3) | `26A5388g` (27.0 Beta 4) | `26A5406e` (27.0 Beta 5) | `26A5416b` (27.0 Beta 6) | `26A5421a` (27.0 Beta 7) | `26A5425a` (27.0 Beta 8) |
+| What | How | Beta 2 value | Beta 3 value | Beta 4 value | Beta 5 value | Beta 6 value | Beta 7 value | Beta 8 value | 27.0 RC |
+|---|---|---|---|---|---|---|---|---|---|
+| fm source version | `otool -l /usr/bin/fm \| grep -A2 LC_SOURCE_VERSION` | `2.0.55.1.402` | `2.0.59` | `2.0.62.1.402` | `2.0.68.1.401` | `2.0.68.1.401` | `2.0.68.1.402` | `2.0.68.1.402` | `2.0.68.1.402` |
+| Framework version | `plutil -p /System/Library/Frameworks/FoundationModels.framework/Resources/Info.plist \| grep CFBundleVersion` | `2.0.55.1.402` | `2.0.59` | `2.0.62.1.402` | `2.0.68.1.401` | `2.0.68.1.401` | `2.0.68.1.402` | `2.0.68.1.402` | `2.0.68.1.402` |
+| Runtime version | `codesign -dvvv /usr/bin/fm` → `Runtime Version=` | `27.0.0` | `27.0.0` | `27.0.0` | `27.0.0` | `27.0.0` | `27.0.0` | `27.0.0` | `27.0.0` |
+| Rebuild date | `ls -la /usr/bin/fm` (mtime) | Jun 19 2026 | Jul 3 2026 | Jul 17 2026 | Aug 7 2026 | Aug 14 2026 | Aug 21 2026 | Aug 27 2026 | Sep 3 2026 |
+| macOS build | `sw_vers` → `BuildVersion` | `26A5368g` (27.0 Beta 2) | `26A5378j` (27.0 Beta 3) | `26A5388g` (27.0 Beta 4) | `26A5406e` (27.0 Beta 5) | `26A5416b` (27.0 Beta 6) | `26A5421a` (27.0 Beta 7) | `26A5425a` (27.0 Beta 8) | `26A428` (27.0 RC) |
 
 Audit recipe after any OS update:
 
@@ -61,9 +62,20 @@ Audit recipe after any OS update:
    - `n > 1` — 400s
    - prompt framing — `hello world` should be 57 `prompt_tokens`
    - the 4096-token window — a ~4056-token prompt passes, ~8056 does not
+   - tool-call content — check the reply text for `<start_of_turn>` and `<ctrl NN>`
+     markers, and send at least 10 requests, because the leak is intermittent
+3. **Licence** — run `fm license --status` and `fm license --show`. Both print without
+   prompting. Compare the agreed version and the terms against the previous section.
 
-Record the result as a new `### Beta N` section, and fold the previous one into the
-release-history table.
+Record the result as a new section, and fold the previous one into the release-history
+table.
+
+Warning: a cyclic `$defs` request hangs `fm serve` permanently. Run that test last, and
+restart `fm serve` afterwards.
+
+Caution: for the first hour after an OS update, do not trust a failure. The machine may
+still be settling its model assets, and `com.apple.SensitiveContentAnalysisML error 15`
+can appear and then clear itself. `fm available` does not detect that state.
 
 ## Running Pi against fm-proxy
 
@@ -161,6 +173,111 @@ The proxy is a drop-in OpenAI endpoint — point any OpenAI client at it and go:
     no second model to switch to.
   - `type: "server_error"` (`code: "internal_error"` / `"upstream_unreachable"`) —
     anything else, including the `502` when `fm serve` is down.
+
+### macOS 27.0 RC (fm 2.0.68.1.402, build 26A428) — one change, one open question
+
+Audited 2026-09-09 against a live `fm serve` on `system`. Apple rebuilt the binary on
+Sep 3 2026. The source version did not move: it holds at `2.0.68.1.402`, as it has since
+Beta 7. `python3 tools/gen-fm-docs.py` produces a CLI tree that is byte-identical to the
+committed one, so the structural diff is empty. PCC is still absent, and `/v1/models`
+lists only `system`.
+
+The licence did not change. `fm license --status` reports `FM1 version 1.0`, agreed on
+Aug 15 2026, and the RC did not ask again. `fm license --show` prints the same
+programmatic-access clause word for word. The README CAUTION stays.
+
+> `fm license --show` prints the terms without prompting, and `fm license --status`
+> reports the agreed version. Use those to check the licence. Do not run `sudo fm
+> license` to read it.
+
+Most walls reproduce:
+
+| Check | Beta 8 | 27.0 RC |
+|---|---|---|
+| Forced `tool_choice` | `500` unsupported generation guide | Same |
+| Tool with no `function.description` | `400` | Same |
+| `stream` omitted | `text/event-stream` | Same |
+| `n > 1` | `400` | Same |
+| `hello world` framing | 57 `prompt_tokens` | Same |
+| Context window | ~4055 pass, overflow above | 4045 pass, ~4255 overflows |
+| `$defs` non-cyclic + dialect | `200` | Same |
+| Titled string needs a non-empty `enum` | `400` without, `200` with | Same |
+| Bare `$defs`, no dialect | `400` on `x-order` | Same |
+| `array<array<object>>` tool param | `200` | Same |
+| Vision | describes a 256 px PNG | Same, 131 `prompt_tokens` |
+| PCC | absent from the binary | Same |
+| `$defs` cyclic + dialect | hangs, restart recovers | Same |
+| Tool calling | `tool_calls` null, content clean JSON | **Changed — see below** |
+
+#### Tool calling now leaks chat-template control tokens
+
+Tool calling is still broken: `fm serve` never populates `tool_calls`. What is new is the
+content. When the request carries `tools`, the reply text contains raw template markers.
+Two appeared: `<start_of_turn>` and `<ctrl46>`.
+
+| Path | Replies that leaked | Sample |
+|---|---|---|
+| Direct to `fm serve` | 7 | 10 |
+| Through the proxy | 9 | 10 |
+
+Both samples are 10 requests with one prompt and one tool. Read them as "most replies".
+The gap between the two paths is sampling noise, not a proxy effect: the proxy does not
+filter content.
+
+The leak needs `tools` in the request. The same prompt without `tools` leaked 0 of 4
+times. An unrelated prompt leaked 0 of 4 times.
+
+One reply shows what is underneath: `<start_of_turn>model\n{"tool_call": [{"name":
+"get_weather", ...`. The model does emit a tool call. The template wrapper around it is
+the new part.
+
+Beta 8 recorded clean JSON here. The leak is intermittent, so it is either new in the RC
+or it was missed earlier. This audit cannot tell the two apart.
+
+The proxy does not strip these markers. Whether it should is an open decision: stripping
+content is a filter, and this project has so far corrected only envelopes and schemas.
+
+#### The cyclic `$defs` hang is unchanged. A separate fault was environmental
+
+The cyclic `$defs` request still hangs `fm serve`, and a restart of `fm serve` still
+recovers it, exactly as on Beta 8. The proxy guard from `57f26d3` still blocks the request
+first: `400` / `cyclic_schema` in 3-6 ms when warm.
+
+Getting to that answer took an experiment, because the first attempt looked like a
+regression. After the first cyclic test, the restart did not recover the model. Every
+later request failed with `com.apple.SensitiveContentAnalysisML error 15`, and
+`fm respond` failed the same way, so the fault sat below `fm serve`. Three causes fit: the
+hang, the stop of a hung `fm serve`, or safety assets still settling after the OS update.
+
+The model recovered on its own about 20 to 30 minutes later, with no intervention. That
+made the experiment possible:
+
+| Test | Result |
+|---|---|
+| Stop a **healthy** `fm serve`, restart, send `hello world` | `200`, 57 `prompt_tokens` |
+| Hang it with the cyclic schema, restart, send `hello world` | `200`, 57 `prompt_tokens` |
+| Repeat the hang and restart a second time | `200`, 57 `prompt_tokens` |
+
+Error 15 never came back. The hang does not cause it, and stopping `fm serve` does not
+cause it. The remaining explanation is the OS update, which is what Beta 2 showed: the
+same error appeared there after an update with no cyclic schema involved, and it cleared
+on its own.
+
+Expect the first request after a restart to take about 25 seconds while the model reloads.
+
+Two operational facts are worth keeping:
+
+- **`fm available` is not a health check.** It reported "System model available" through
+  the whole fault. Test health with a real inference request.
+- **After an OS update, wait before you trust a failure.** Error 15 can appear on a
+  settling machine and clear itself. See `tools/TEST_PLAN.md`.
+
+#### Test results
+
+All 108 unit tests pass. `node tools/wire-baseline.js` records the same 14 cases and 3
+endpoints. `node tools/deviation-probe.js 1977` reports 11 of 11 handled.
+`tools/harness-check.sh` reports 6 passed, 1 failed, which is the expected `pi` result
+described in `tools/TEST_PLAN.md`.
 
 ### Beta 8 (fm 2.0.68.1.402, build 26A5425a) — no change
 
@@ -362,8 +479,8 @@ was "use `pcc`". With `pcc` removed there is no longer any way to run `pi` again
 
 ### Release history before Beta 7
 
-Beta 7 and Beta 8 are the supported builds, and they behave identically. The proxy no longer carries code for earlier ones.
-Kept as a short record of how the upstream behaviour arrived where it is:
+Beta 7 and later are the supported builds. The proxy no longer carries code for earlier
+ones. Kept as a short record of how the upstream behaviour arrived where it is:
 
 | Build | `fm` | What it changed |
 |---|---|---|
@@ -372,6 +489,7 @@ Kept as a short record of how the upstream behaviour arrived where it is:
 | Beta 4 `26A5388g` | 2.0.62.1.402 | `token-count` renamed `count-tokens`; `--load-transcript` renamed `--resume`. Object chains of any depth decoded. PCC began requiring Terminal.app. |
 | Beta 5 `26A5406e` | 2.0.68.1.401 | Licence gate added. `stream` default flipped to SSE. Tool calling broke. `$defs` with the dialect began hanging the server. |
 | Beta 6 `26A5416b` | 2.0.68.1.401 | Rebuilt binary, byte-identical CLI surface. No behaviour change. |
+| Beta 8 `26A5425a` | 2.0.68.1.402 | Rebuilt binary, byte-identical CLI surface. No behaviour change. Found and fixed a proxy bug: a capped stream emitted two `finish_reason` values. |
 
 Two of those are still live constraints and are documented above rather than here: the
 licence gate, and the SSE default for a request that omits `stream`.
@@ -440,6 +558,11 @@ streaming chat, streaming usage relay, `stream`-omitted → JSON, structured out
 > under test. Restart `fm serve` and re-run a control that is known to pass before you
 > trust any negative result. An early Beta 5 run wrongly concluded that object `title`
 > caused a hang; it passes on a clean server.
+>
+> The error 15 part of that caution did not reproduce on the 27.0 RC. A deliberate hang
+> plus a restart returned a healthy server twice, and error 15 never followed. Either the
+> link was specific to Beta 5, or the Beta 5 run hit the same environmental fault that the
+> RC audit later traced to a settling machine. Treat error 15 as environmental first.
 
 ### Known limits
 

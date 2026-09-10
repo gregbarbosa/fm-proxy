@@ -12,7 +12,10 @@ of it and corrects those departures.
 > **Read the licence before you use this.**
 >
 > macOS 27.0 Beta 5 added a legal notice. You must accept it before `fm` runs at all.
-> Run `sudo fm license` to read it. It says:
+> Run `sudo fm license` to read it and accept it. After that, `fm license --show`
+> prints the text again without prompting, and `fm license --status` reports the
+> version you agreed to. The 27.0 RC still carries the same text, recorded as
+> `FM1 version 1.0`. It says:
 >
 > > YOU ARE ALSO AGREEING TO NOT PROGRAMMATICALLY ACCESS OR USE APPLE MODELS THROUGH
 > > APPLE SOFTWARE OR SERVICES EXCEPT AS EXPRESSLY PERMITTED.
@@ -28,19 +31,22 @@ of it and corrects those departures.
 
 [fmf]: https://developer.apple.com/documentation/foundationmodels
 
-## State on Beta 7
+## State on the 27.0 RC
 
-Tested on macOS 27.0 Beta 7 (`26A5421a`), which ships `fm` 2.0.68.1.402.
+Tested on macOS 27.0 RC (`26A428`), which ships `fm` 2.0.68.1.402. Beta 7 and Beta 8
+ship the same `fm` build and behave the same way, apart from the tool-call content
+described below.
 
 > [!IMPORTANT]
-> **Beta 7 removes the `pcc` model. Private Cloud Compute is gone from `fm`.**
+> **Beta 7 removed the `pcc` model, and the RC does not bring it back. Private Cloud
+> Compute is gone from `fm`.**
 >
 > `fm` accepts only `system` now. `fm respond -m pcc` answers `Please provide one of
 > 'system'`. The `fm quota-usage` subcommand is deleted. `fm serve` answers a request
 > for `pcc` with `400 Unknown model 'pcc'. Available models: system`.
 >
 > This is a change in the binary, not a licence or account state. Every PCC feature
-> that earlier notes describe is unreachable on Beta 7.
+> that earlier notes describe is unreachable.
 
 | Feature | State |
 |---|---|
@@ -54,15 +60,22 @@ Tested on macOS 27.0 Beta 7 (`26A5421a`), which ships `fm` 2.0.68.1.402.
 | **Tool / function calling** | **Broken upstream. See the warning below.** |
 
 > [!WARNING]
-> **Tool calling is still broken on Beta 7, and it still fails silently.**
+> **Tool calling is still broken, and it still fails silently.**
 >
 > `fm serve` does not convert the model's tool call into a `tool_calls` field. The
 > field stays absent and `finish_reason` is `stop`.
 >
-> Beta 7 changes the shape of the failure. The model now writes clean JSON into
+> The model picks the correct tool and the correct arguments, and writes them into
 > `content`, for example `{"tool_call": [{"name": "get_weather", "arguments":
-> {"city": "Tokyo"}}]}`, and no control tokens leak. It picks the correct tool and the
-> correct arguments. Only the upstream parser step is missing.
+> {"city": "Tokyo"}}]}`. Only the upstream parser step is missing.
+>
+> On the RC the content is no longer clean. Most replies to a request that carries
+> `tools` also contain raw chat-template markers such as `<start_of_turn>` and
+> `<ctrl46>`. Seven of 10 direct replies and 9 of 10 replies through the proxy carried
+> one. The proxy does not remove them, because it corrects envelopes and schemas and
+> does not filter content. Strip them in your client if you parse `content`.
+>
+> The leak needs `tools` in the request. Ordinary chat is not affected.
 >
 > Do not use tool calling for work that you must trust. The proxy still repairs tool
 > schemas, so tool calling returns without a change here once `fm serve` reads the
@@ -72,10 +85,13 @@ Tested on macOS 27.0 Beta 7 (`26A5421a`), which ships `fm` 2.0.68.1.402.
 > **A self-referencing `$defs` schema stops `fm serve`. The proxy blocks it for you.**
 >
 > A `$defs` definition that refers to itself hangs `fm serve`. The request never
-> returns, every later request hangs too, and only a restart clears it. Recursion has
-> no finite inline form, so the proxy cannot rewrite the schema. It rejects the request
-> instead, with `400` `cyclic_schema` naming the definition, before it opens an upstream
-> connection. Send a recursive schema to `fm serve` directly and you still lose it.
+> returns, and every later request hangs too. Recursion has no finite inline form, so
+> the proxy cannot rewrite the schema. It rejects the request instead, with `400`
+> `cyclic_schema` naming the definition, before it opens an upstream connection. Send a
+> recursive schema to `fm serve` directly and you still lose it.
+>
+> A restart of `fm serve` clears it, on the 27.0 RC as on every earlier build. Expect the
+> first request after the restart to take about 25 seconds while the model reloads.
 
 `fm serve` rejects `n > 1` with `400 n=3 is not supported. Only a single completion per
 request is implemented.` The proxy types that as `invalid_request_error` and does not
@@ -84,7 +100,8 @@ through unchanged.
 
 ## Requirements
 
-- macOS 27.0 Beta 7, which includes `fm` 2.0.68.1.402. Earlier betas are not supported.
+- macOS 27.0 Beta 7 or later, which includes `fm` 2.0.68.1.402. Tested on the 27.0 RC
+  (`26A428`). Earlier betas are not supported.
 - An Apple Account, signed in, with Apple Intelligence enabled. The `system` model runs
   locally.
 - Node.js 18 or later. The proxy uses only the standard library.
@@ -102,7 +119,7 @@ Wait for `stack up — OpenAI base URL: http://127.0.0.1:1977/v1`.
 The launcher runs `fm serve` in the foreground and the proxy as a background child.
 Press Ctrl-C to stop both. Do not press Ctrl-Z: a suspended `fm serve` keeps the port.
 
-Beta 7 removes the `pcc` model, so the Terminal.app foreground rule that Private Cloud
+Beta 7 removed the `pcc` model, so the Terminal.app foreground rule that Private Cloud
 Compute needed no longer applies. The `system` model works in any terminal, and in a
 background process.
 
@@ -117,7 +134,7 @@ node fm-proxy.js                # the proxy, :1977 -> :1976
 
 - Base URL: `http://127.0.0.1:1977/v1`
 - API key: any value. The proxy requires one and ignores it.
-- Models: `system` (on-device). It is the only model Beta 7 accepts.
+- Models: `system` (on-device). It is the only model `fm` accepts.
 
 ```python
 from openai import OpenAI
