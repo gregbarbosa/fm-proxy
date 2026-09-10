@@ -379,43 +379,29 @@ re-sends the same oversized transcript. The message leads with the canonical phr
 
 ### Structured output (`response_format`)
 
-fm serve honors OpenAI `response_format: {type:"json_schema", json_schema:{name, schema}}`
-(undocumented; constrained decoding is real).
+`fm serve` honours OpenAI `response_format: {type:"json_schema", json_schema:{name,
+schema}}`. It is undocumented, and the constrained decoding is real.
 
-**The dialect requirement is narrower than first found, and the proxy now fixes it.**
-The original (2026-06-14) finding said fm's `title`/`x-order`/`required`/
-`additionalProperties` dialect was needed "on every object level" — but that was only
-ever tested against a `$defs`/`$ref`-shaped schema. Re-verified live (2026-07-06, fm
-2.0.59): the dialect is required **only on object schemas reached through `$defs`** (the
-`$defs` entries themselves, and any object nested inside one — inline sub-properties,
-array items — recursively). The **top-level schema** and any object reached **purely
-through inline `properties` nesting** (never touching `$defs`) — flat schemas,
-multi-level inline nesting, arrays of inline objects — decode with **zero** dialect keys.
-Missing a required dialect key on a `$defs` object raises a specific error naming it
-(`keyNotFound 'x-order'`, "Object schemas require a 'title' key", a missing `required`, a
-missing `additionalProperties`); a `$ref` pointing at a non-object `$defs` entry (e.g. an
-array wrapper defined directly under `$defs`) also fails (`undefinedReferences`) — keep
-array wrappers inline and put only the referenced object type in `$defs`, which is what
-real generators already do.
+**The dialect rule.** `fm serve` requires its own keys — `title`, `x-order`, `required`,
+`additionalProperties` — but only on object schemas reached through `$defs`: the `$defs`
+entries themselves, and any object nested inside one, recursively, including array items.
+The top-level schema and any object reached purely through inline `properties` nesting
+need none. A missing key raises an error that names it, such as `keyNotFound 'x-order'`.
 
-This still matters in practice: real schema generators (pydantic's
-`.model_json_schema()`, zod-to-json-schema, TypeBox, …) virtually always emit
-`$defs`/`$ref` for any named or reused type, so an ordinary client sending a plain,
-undecorated schema with `$defs` would 400 against raw `fm serve`. **`fm-proxy.js` now
-fixes this** (`fixResponseFormatSchema`, wired into `fixTools`): it walks
-`response_format.json_schema.schema.$defs` and injects `title` (from the `$defs` key, or
-the capitalized property name for anything nested deeper), `x-order` (the object's own
-property order), `required` (preserved from the caller, filtered to real properties, else
-`[]`), and `additionalProperties:false` (unless already boolean) — recursively, including
-into array items. The top-level schema and any `$defs`-free inline nesting are left
-exactly as sent, since decorating them is unnecessary token bloat, not a requirement.
-Both flat and `$defs`/`$ref`-nested requests, streaming and non-streaming, verified live
-end-to-end through the real running proxy.
+Two shapes to avoid:
 
-**Nested objects work as of Beta 3** (fixed alongside the tool-parameter path — see
-"Nested params" above): a two-level nested schema (`$defs`/`$ref`) decodes correctly via
-both `fm respond --schema` and `response_format` over `/v1/chat/completions`, once the
-`$defs` dialect above is present. Not retested: whether `response_format`'s nested
-support has the same residual gap as the tool path (`array<array<object>>`; the 3+
-chained-object gap was fixed in Beta 4) — if you hit it there, it likely applies here
-too since both paths share the same underlying `GenerationSchema` engine.
+- A `title` on a string schema makes it a named string type, which then requires a
+  non-empty `enum`. Apply the dialect to objects only, or add the `enum`.
+- A `$ref` that points at a non-object `$defs` entry, such as an array wrapper defined
+  directly under `$defs`, fails with `undefinedReferences`. Keep array wrappers inline
+  and put only the referenced object type in `$defs`. Real generators already do this.
+
+**The proxy handles all of it.** `fixResponseFormatSchema` resolves `$ref` inline and
+drops `$defs` entirely, so the dialect question never reaches `fm serve`. It falls back
+to injecting the dialect only when a schema cannot be inlined. This matters because
+pydantic, zod-to-json-schema, and TypeBox all emit `$defs`/`$ref` for named types, so an
+ordinary client would otherwise get a `400`.
+
+Warning: a cyclic `$defs` has no finite inline form, and forwarding one hangs `fm serve`
+permanently. The proxy rejects it with `400` `cyclic_schema` before it opens an upstream
+connection.
