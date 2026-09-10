@@ -70,8 +70,12 @@ Audit recipe after any OS update:
 Record the result as a new section, and fold the previous one into the release-history
 table.
 
-Warning: a cyclic `$defs` request can leave the model service unable to answer, and a
-restart of `fm serve` may not repair it. Run that test last, and expect to reboot.
+Warning: a cyclic `$defs` request hangs `fm serve` permanently. Run that test last, and
+restart `fm serve` afterwards.
+
+Caution: for the first hour after an OS update, do not trust a failure. The machine may
+still be settling its model assets, and `com.apple.SensitiveContentAnalysisML error 15`
+can appear and then clear itself. `fm available` does not detect that state.
 
 ## Running Pi against fm-proxy
 
@@ -202,8 +206,8 @@ Most walls reproduce:
 | `array<array<object>>` tool param | `200` | Same |
 | Vision | describes a 256 px PNG | Same, 131 `prompt_tokens` |
 | PCC | absent from the binary | Same |
+| `$defs` cyclic + dialect | hangs, restart recovers | Same |
 | Tool calling | `tool_calls` null, content clean JSON | **Changed — see below** |
-| `$defs` cyclic + dialect | hangs, restart recovers | **Hang same, recovery open** |
 
 #### Tool calling now leaks chat-template control tokens
 
@@ -233,39 +237,40 @@ or it was missed earlier. This audit cannot tell the two apart.
 The proxy does not strip these markers. Whether it should is an open decision: stripping
 content is a filter, and this project has so far corrected only envelopes and schemas.
 
-#### The model service stopped answering — cause not established
+#### The cyclic `$defs` hang is unchanged. A separate fault was environmental
 
-The cyclic `$defs` request still hangs `fm serve`. That is unchanged, and the proxy guard
-from `57f26d3` still blocks it first: `400` / `cyclic_schema` in 3-6 ms when warm.
+The cyclic `$defs` request still hangs `fm serve`, and a restart of `fm serve` still
+recovers it, exactly as on Beta 8. The proxy guard from `57f26d3` still blocks the request
+first: `400` / `cyclic_schema` in 3-6 ms when warm.
 
-What differs is the recovery. On Beta 8 a restart of `fm serve` cleared the hang. Here it
-did not. Every later request failed with `com.apple.SensitiveContentAnalysisML error 15`.
-`fm respond` failed the same way, so the fault sits below `fm serve`. `fm available`
-still reported "System model available", so that command does not detect this fault.
+Getting to that answer took an experiment, because the first attempt looked like a
+regression. After the first cyclic test, the restart did not recover the model. Every
+later request failed with `com.apple.SensitiveContentAnalysisML error 15`, and
+`fm respond` failed the same way, so the fault sat below `fm serve`. Three causes fit: the
+hang, the stop of a hung `fm serve`, or safety assets still settling after the OS update.
 
-**Do not record this as a regression.** Three causes fit, and this audit did not separate
-them:
+The model recovered on its own about 20 to 30 minutes later, with no intervention. That
+made the experiment possible:
 
-1. The cyclic hang wedged the safety service.
-2. Stopping a hung `fm serve` wedged the safety service.
-3. The safety assets were still settling after the OS update.
+| Test | Result |
+|---|---|
+| Stop a **healthy** `fm serve`, restart, send `hello world` | `200`, 57 `prompt_tokens` |
+| Hang it with the cyclic schema, restart, send `hello world` | `200`, 57 `prompt_tokens` |
+| Repeat the hang and restart a second time | `200`, 57 `prompt_tokens` |
 
-Cause 3 has the most independent support. Beta 2 produced this identical error after an
-OS update with no cyclic schema involved, and Beta 3 cleared it. The machine had been up
-for 21 minutes, and the load average was between 55 and 88. Against cause 3: dozens of
-requests succeeded earlier in the same session.
+Error 15 never came back. The hang does not cause it, and stopping `fm serve` does not
+cause it. The remaining explanation is the OS update, which is what Beta 2 showed: the
+same error appeared there after an update with no cyclic schema involved, and it cleared
+on its own.
 
-To settle it, first recover the model: stop the safety provider process and let
-ExtensionKit start it again, then run `fm respond "hi"`. Reboot if the error stays. Then
-run this experiment:
+Expect the first request after a restart to take about 25 seconds while the model reloads.
 
-1. Confirm that an ordinary request succeeds.
-2. Send the cyclic schema direct to `fm serve`.
-3. Restart `fm serve`.
-4. Send `hello world`.
+Two operational facts are worth keeping:
 
-If error 15 returns, the cyclic hang is the cause. If it does not, the row matches Beta 8
-and a restart still recovers.
+- **`fm available` is not a health check.** It reported "System model available" through
+  the whole fault. Test health with a real inference request.
+- **After an OS update, wait before you trust a failure.** Error 15 can appear on a
+  settling machine and clear itself. See `tools/TEST_PLAN.md`.
 
 #### Test results
 
@@ -553,6 +558,11 @@ streaming chat, streaming usage relay, `stream`-omitted → JSON, structured out
 > under test. Restart `fm serve` and re-run a control that is known to pass before you
 > trust any negative result. An early Beta 5 run wrongly concluded that object `title`
 > caused a hang; it passes on a clean server.
+>
+> The error 15 part of that caution did not reproduce on the 27.0 RC. A deliberate hang
+> plus a restart returned a healthy server twice, and error 15 never followed. Either the
+> link was specific to Beta 5, or the Beta 5 run hit the same environmental fault that the
+> RC audit later traced to a settling machine. Treat error 15 as environmental first.
 
 ### Known limits
 

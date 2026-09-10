@@ -90,10 +90,8 @@ described below.
 > `cyclic_schema` naming the definition, before it opens an upstream connection. Send a
 > recursive schema to `fm serve` directly and you still lose it.
 >
-> A restart of `fm serve` usually clears it. On the 27.0 RC it did not: every later
-> request failed with `com.apple.SensitiveContentAnalysisML error 15`, and `fm respond`
-> failed the same way. Whether the hang caused that is not established. Expect to
-> reboot.
+> A restart of `fm serve` clears it, on the 27.0 RC as on every earlier build. Expect the
+> first request after the restart to take about 25 seconds while the model reloads.
 
 `fm serve` rejects `n > 1` with `400 n=3 is not supported. Only a single completion per
 request is implemented.` The proxy types that as `invalid_request_error` and does not
