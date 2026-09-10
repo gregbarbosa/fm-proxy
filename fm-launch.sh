@@ -10,15 +10,13 @@
 # The proxy is a backgrounded child. Traps on INT/TERM/HUP/EXIT tear it down so it
 # can't orphan (Ctrl-C, closed terminal, or fm serve dying all clean up the proxy).
 #
-#   ./fm-launch.sh             # quiet: startup + proxy errors/warnings only
-#   ./fm-launch.sh --verbose   # also shows the proxy's per-request [assembled] telemetry
+#   ./fm-launch.sh             # startup, throughput, and proxy errors
 #
 # Note: fm serve's own output is NOT tagged (tagging requires piping it, which is
 # untested for attribution safety); only the proxy's output is tagged. Hit Ctrl-C to
 # stop (NOT Ctrl-Z — a suspended fm serve won't be reaped cleanly).
 #
 # Options / env:
-#   -v, --verbose            show the proxy's per-request [assembled] telemetry
 #   --fm-port <n>            fm serve port      (default 1976, env FM_PORT)
 #   --proxy-port <n>         proxy port         (default 1977, env PROXY_PORT)
 #   --fm-bin <path>          fm binary          (default /usr/bin/fm, env FM_BIN)
@@ -30,7 +28,6 @@ set -uo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # ── args ─────────────────────────────────────────────────────────────────────
-VERBOSE=false
 FM_PORT="${FM_PORT:-1976}"
 PROXY_PORT="${PROXY_PORT:-1977}"
 FM_BIN="${FM_BIN:-/usr/bin/fm}"
@@ -42,8 +39,6 @@ fm-launch — start Apple fm serve + the OpenAI-compat proxy together
 
 Usage: ./fm-launch.sh [options]
 
-  -v, --verbose          show the proxy's per-request [assembled] telemetry
-                         (errors/warnings are always shown, even without this)
   --fm-port <n>          fm serve port          (default 1976)
   --proxy-port <n>       proxy port clients use (default 1977)
   --fm-bin <path>        fm binary              (default /usr/bin/fm)
@@ -58,7 +53,6 @@ EOF
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    -v|--verbose) VERBOSE=true; shift ;;
     --fm-port) FM_PORT="${2:-}"; shift 2 ;;
     --proxy-port) PROXY_PORT="${2:-}"; shift 2 ;;
     --fm-bin) FM_BIN="${2:-}"; shift 2 ;;
@@ -78,10 +72,6 @@ sayerr() { printf '%s [launch] %s\n' "$(ts)" "$*" >&2; }
 tag_stream() {
   local line
   while IFS= read -r line || [[ -n "$line" ]]; do
-    if [[ "$VERBOSE" == false ]]; then
-      [[ "$line" =~ ^\[assembled\]\ req\ model= ]] && continue
-      [[ "$line" =~ \*\*\*\ UPSTREAM\ RESPONSE\ HTTP\ [23][0-9][0-9]\ \*\*\* ]] && continue
-    fi
     printf '%s [proxy] %s\n' "$(ts)" "$line"
   done
 }
@@ -150,8 +140,6 @@ say "starting fm serve on :$FM_PORT  (FOREGROUND)"
   if wait_health "$FM_PORT" "$HEALTH_TIMEOUT_MS"; then
     say "fm serve is healthy ✓"
     say "stack up — OpenAI base URL: http://127.0.0.1:$PROXY_PORT/v1  (any dummy API key)"
-    [[ "$VERBOSE" == false ]] && \
-      say "running in quiet mode; pass --verbose for per-request telemetry. Errors are always shown."
   else
     sayerr "fm serve did not become healthy on :$FM_PORT. Is Apple Intelligence enabled, and the CLI licence accepted (sudo fm license)?"
   fi

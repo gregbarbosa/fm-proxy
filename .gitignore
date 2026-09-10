@@ -1,5 +1,13 @@
 .DS_Store
-tools/
+
+# Local-only tools. They need software this repo does not ship: harness-check.sh
+# drives `pi`, and ask-image.sh is a manual one-off probe.
+tools/harness-check.sh
+tools/ask-image.sh
+
+# Generated from the installed `fm` binary, so it is only ever right for the build on
+# this machine. Run `python3 tools/gen-fm-docs.py` to produce it.
+docs/fm-reference.md
 
 # Local tool artifacts and scratch work, not part of the proxy.
 .firecrawl/

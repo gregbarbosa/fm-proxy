@@ -2,17 +2,18 @@
 // fm-proxy.js — OpenAI-compatible front for Apple's `fm serve`.
 // Proxies http://127.0.0.1:1977 -> http://127.0.0.1:1976 (node fm-proxy.js)
 //
-// fm serve's JSON Schema limits for tool parameters: root `required` must be
-// present; no anyOf/allOf/oneOf/if-then-else/not/patternProperties. Nested objects
-// decode natively at any depth, array<array<object>> included (Beta 7; earlier betas
-// needed a JSON-string round-trip for that one shape, removed with their support).
-// $ref/$defs are inlined first (tool parameters and response_format) — fm serve
-// understands neither.
+// fm serve's JSON Schema limits for tool parameters: the root `required` must be
+// present, and anyOf/allOf/oneOf/if-then-else/not/patternProperties are all rejected.
+// Nested objects decode natively at any depth. $ref and $defs are inlined first, in
+// both tool parameters and response_format, because fm serve understands neither.
 
 const http = require("http");
 const { execFileSync } = require("child_process");
 const FM_PORT = Number(process.env.FM_PORT) || 1976;
 const PROXY_PORT = Number(process.env.PROXY_PORT) || 1977;
+// Matches fm-launch.sh's --fm-bin/FM_BIN. Point it at a path that does not exist to
+// force the heuristic token count, which is what makes a test run deterministic.
+const FM_BIN = process.env.FM_BIN || "/usr/bin/fm";
 
 // fm serve has DISTINCT failure modes this proxy must not conflate (see
 // classifyError): transient rate-limits are retried with backoff; safety-guardrail
@@ -23,15 +24,15 @@ const RETRY_BASE_MS = Number(process.env.FM_RETRY_BASE_MS ?? 1000);
 const RETRY_CAP_MS = Number(process.env.FM_RETRY_CAP_MS ?? 15000);
 
 // ── Token counting ───────────────────────────────────────────────────────────
-// Fallback only (fm serve sends real usage) plus the assembled-size instrumentation
-// below. `fm count-tokens` where possible, chars/4.4 heuristic when it's unavailable.
+// Fallback only: fm serve sends real usage, so this runs when a request ends without
+// one (a guardrail abort). `fm count-tokens` where possible, chars/4.4 heuristic when
+// it is unavailable. Every count forks `fm` synchronously and blocks the event loop,
+// so callers must stay off the hot path.
 const CHARS_PER_TOKEN = 4.4;
-// Two measured framing constants — they reproduce fm serve's prompt_tokens exactly,
-// do not "simplify": CONVERSATION_FRAMING is the fixed cost around a whole
-// conversation (present only with -i; flat 54 at lengths 6–400); PER_MESSAGE_FRAMING
-// is the cost of splitting text across turns (4 per message beyond the first).
+// A measured constant that reproduces fm serve's prompt_tokens exactly — do not
+// "simplify" it. It is the fixed cost around a whole conversation, present only with
+// -i, and flat at 54 for lengths 6 to 400.
 const CONVERSATION_FRAMING = 54;
-const PER_MESSAGE_FRAMING = 4;
 
 // Content-only estimate; framing is added by the caller that needs it.
 function estimateTokens(text) {
@@ -60,8 +61,6 @@ function splitMessages(messages) {
 // Memoized and bounded — each call forks `fm` synchronously, heavy inputs repeat.
 const _tokenCache = new Map();
 const _TOKEN_CACHE_MAX = 512;
-// No fallback probe for the pre-Beta-4 `token-count` spelling — a probe spawns `fm`
-// twice per count and cannot succeed on a supported build anyway.
 const TOKEN_SUBCOMMAND = "count-tokens";
 // The CLI has a machine-wide legal-notice gate: until a privileged user runs
 // `sudo fm license`, every subcommand exits 69 and prints a banner to stderr.
@@ -83,7 +82,7 @@ function fmTokenCount(text, instructions) {
   try {
     const args = [TOKEN_SUBCOMMAND, "-q"];
     if (instructions) args.push("-i", instructions);
-    const out = execFileSync("/usr/bin/fm", args, {
+    const out = execFileSync(FM_BIN, args, {
       input: text || "",
       encoding: "utf8",
       timeout: 5000,
@@ -118,50 +117,6 @@ function countPromptTokens(messages) {
   // With -i the count matches fm serve's prompt_tokens exactly; without it it sits 54
   // low (the conversation framing), so add it back for system-less requests.
   return instructions ? n : n + CONVERSATION_FRAMING;
-}
-
-// ── Assembled-request instrumentation ────────────────────────────────────────
-// The gauge counts only messages[].content; fm serve also frames tool schemas, prior
-// tool_calls (m.tool_calls, not content), and a per-turn wrapper — log the real size.
-function assembledTokenBreakdown(parsedReq, fixedBody) {
-  const messages = (parsedReq && parsedReq.messages) || [];
-  // 1. messages content — the current gauge number.
-  const msgTokens = countPromptTokens(messages);
-  // 2. flattened tool schemas as forwarded to fm serve.
-  let tools = (parsedReq && parsedReq.tools) || null;
-  try { const f = JSON.parse(fixedBody); if (f && f.tools) tools = f.tools; } catch {}
-  const toolsJson = tools && tools.length ? JSON.stringify(tools) : "";
-  const toolTokens = toolsJson
-    ? (fmTokenCount(toolsJson) ?? estimateTokens(toolsJson))
-    : 0;
-  // 3. assistant tool_calls — invisible to splitMessages (content is null).
-  let toolCallText = "";
-  for (const m of messages) {
-    if (Array.isArray(m.tool_calls)) {
-      for (const tc of m.tool_calls) {
-        const fn = tc && tc.function;
-        if (fn) toolCallText += (fn.name || "") + (fn.arguments || "");
-      }
-    }
-  }
-  const toolCallTokens = toolCallText
-    ? (fmTokenCount(toolCallText) ?? estimateTokens(toolCallText))
-    : 0;
-  // 4. per-turn framing — the gauge collapses it to a single overhead.
-  const nonSystemTurns = messages.filter((m) => m.role !== "system").length;
-  const perTurnExtra = PER_MESSAGE_FRAMING * Math.max(0, nonSystemTurns - 1);
-  const assembledTotal = msgTokens + toolTokens + toolCallTokens + perTurnExtra;
-  return { msgTokens, toolTokens, toolCallTokens, perTurnExtra,
-           turns: nonSystemTurns, assembledTotal };
-}
-
-function logBreakdown(tag, model, b) {
-  console.error(
-    `[assembled] ${tag} model=${model} turns=${b.turns} ` +
-    `gauge(msgs)=${b.msgTokens} tools=${b.toolTokens} ` +
-    `toolCalls=${b.toolCallTokens} perTurn=${b.perTurnExtra} ` +
-    `=> assembled=${b.assembledTotal}`
-  );
 }
 
 // One-line throughput counter per completion; guards zero-token/zero-time.
@@ -252,7 +207,7 @@ function simplifyProperty(prop) {
 
 // True if `prop` bottoms out in an object through any number of array wrappers.
 // Flatten a tool's parameter schema into what fm serve decodes. Every nesting depth
-// passes through natively on Beta 7, so this only strips unsupported keywords and
+// passes through natively, so this only strips unsupported keywords and
 // preserves `required`.
 function fixToolSchema(schema) {
   const result = { type: "object", required: [] };
@@ -263,7 +218,7 @@ function fixToolSchema(schema) {
 
   // Resolve $refs first: simplifyProperty strips $ref/$defs, flattening a referenced
   // param to `{}` — the shape pydantic/zod emit for named types. Inlining gives fm
-  // serve the nesting it decodes natively; cyclic refs keep the old behaviour.
+  // serve the nesting it decodes natively.
   if (schema.$defs) schema = inlineDefs(schema) || schema;
 
   result.properties = {};
@@ -279,11 +234,13 @@ function fixToolSchema(schema) {
 }
 
 // ── response_format schema dialect (structured output) ──────────────────────
-// fm serve's dialect needs title + x-order + required + additionalProperties on
-// every object reached through `$defs`; a missing key 400s naming it. Inline-nested
-// objects need none, so inlining (below) is primary; this survives for cyclic refs.
-// Re-verify: undecorated $defs → 400. A cyclic $defs is rejected before this point
-// (findCyclicDefs) because forwarding one hangs fm serve permanently.
+// Strategy for the whole section: inline every $ref and drop $defs, so fm serve never
+// sees a construct it does not understand. Dialect injection is the fallback for the
+// schemas that cannot be inlined.
+//
+// The dialect is title + x-order + required + additionalProperties on every object
+// reached through `$defs`; a missing key returns 400 naming it. Objects reached by
+// inline nesting need none, which is why inlining is primary.
 function isDialectObjectSchema(s) {
   return !!(s && typeof s === "object" && (s.type === "object" || s.properties));
 }
@@ -339,15 +296,13 @@ function inlineDefs(schema) {
   return bailed ? null : result;
 }
 
-// Detect a cycle in the $defs reference graph: a definition that reaches itself
-// through $refs, directly or transitively. Returns the name of the first cyclic
-// definition, or null when the graph is acyclic. Forwarding a cyclic $defs to
-// fm serve HANGS it permanently (Beta 7 — verified live: a definition whose only
-// property is the recursive $ref, with no other required property; every later
-// request hangs too until a restart), and recursion has no finite inline form —
-// so such schemas must be rejected with a client error naming the definition,
-// never forwarded. (Cycles that carry an extra required scalar happen to return
-// 200 today, but that is an undocumented parser quirk — not something to bet on.)
+// Detect a definition that reaches itself through $refs, directly or transitively.
+// Returns the first cyclic definition's name, or null when the graph is acyclic.
+//
+// Forwarding a cyclic $defs hangs fm serve permanently, and every later request hangs
+// with it until a restart. Recursion has no finite inline form, so these must be
+// rejected rather than repaired. A cycle carrying an extra required scalar happens to
+// return 200 today, but that is an undocumented parser quirk — do not bet on it.
 function findCyclicDefs(schema) {
   const defs = schema && schema.$defs;
   if (!defs || typeof defs !== "object") return null;
@@ -382,13 +337,9 @@ function findCyclicDefs(schema) {
   return null;
 }
 
-// Normalise a response_format schema: inline $refs and drop $defs (avoids both the
-// 400 for missing dialect keys and the Beta-5 hang when present). Unresolvable refs
-// fall back to dialect injection above. Cyclic schemas never get here in production:
-// fixTools rejects them via findCyclicDefs before this is called (they cannot be
-// inlined — recursion has no finite inline form — and forwarding them hangs fm
-// serve; see the request-handler guard). The cyclic fallback below survives only
-// for direct callers and as defence in depth.
+// Inline the $refs, or fall back to dialect injection when the schema cannot be
+// inlined. A cyclic schema never reaches here in production — fixTools rejects it
+// first — so the fallback is defence in depth for direct callers.
 function fixResponseFormatSchema(schema) {
   if (!schema || typeof schema !== "object" || !schema.$defs) return schema;
   const inlined = inlineDefs(schema);
@@ -426,7 +377,7 @@ function fixTools(body) {
       if (js && js.schema) {
         // A cyclic $defs cannot be inlined (recursion has no finite inline form) and
         // forwarding it to fm serve HANGS the server permanently — every later request
-        // hangs too, until a restart (Beta 7). Reject the request with a client error
+        // hangs too, until a restart. Reject the request with a client error
         // naming the offending definition instead (see findCyclicDefs; the request
         // handler answers 400 before any upstream connection is made).
         const cyclic = findCyclicDefs(js.schema);
@@ -593,8 +544,8 @@ function createRetryPlan(res, diag, fire) {
 }
 
 // ── Per-request preparation ─────────────────────────────────────────────────
-// Build the upstream payload + context: fixTools rewrites, stream fixups,
-// map, assembled-size instrumentation. Logs once per request.
+// Build the upstream payload and the per-request context: schema rewrites, stream
+// fixups, header scrubbing, and the lazy token-count fallback.
 function prepareUpstreamRequest(req, body) {
   const { body: toolFixed, parsed: parsedReq, responseFormatCycle } = fixTools(body);
 
@@ -638,21 +589,12 @@ function prepareUpstreamRequest(req, body) {
     parsedReq.stream = false;
     fixed = JSON.stringify(parsedReq);
   }
-  // The full assembled size: the fallback number when fm serve sends no usage (e.g.
-  // guardrail abort), logged per request to tie overflows to a real size. Messages
-  // match fm serve exactly; the tool-schema part under-counts. GAUGE_MODE=msgs selects
-  // the messages-only number (kept: an undocumented debug hatch the TEST harness
-  // sets for deterministic [assembled] output — see startStack in fm-proxy.test.js).
-  let breakdown = null;
-  if (isChat && parsedReq) {
-    breakdown = assembledTokenBreakdown(parsedReq, fixed);
-    logBreakdown("req", parsedReq.model || "unknown", breakdown);
-  }
-  const promptTokens = !isChat || !parsedReq
-    ? 0
-    : process.env.GAUGE_MODE === "msgs"
-      ? breakdown.msgTokens
-      : breakdown.assembledTotal;
+  // Prompt tokens for the rare case where fm serve sends no usage at all (a guardrail
+  // abort that never finishes). Counting forks `fm` synchronously, which blocks the
+  // event loop, so never do it on the hot path: the relays call this only when the
+  // fallback actually fires.
+  const promptTokensFallback = () =>
+    isChat && parsedReq ? countPromptTokens(parsedReq.messages) : 0;
 
   // Always forward a fully-buffered body with our own Content-Length; drop any
   // inbound Transfer-Encoding — keeping both is illegal framing and upstream rejects
@@ -670,7 +612,7 @@ function prepareUpstreamRequest(req, body) {
     if (h === "origin" || h === "referer" || h.startsWith("sec-fetch-")) delete upstreamHeaders[h];
   }
   return { fixed, upstreamHeaders, parsedReq, isChat, isStream,
-           clientDeclinedUsage, breakdown, promptTokens, cappedAt, responseFormatCycle };
+           clientDeclinedUsage, promptTokensFallback, cappedAt, responseFormatCycle };
 }
 
 // ── Attempt gate ───────────────────────────────────────────────────────────
@@ -707,7 +649,7 @@ function createAttemptGate({ res, proxyRes, proxyReq, plan, attempt, isStream, d
 // Relays one upstream SSE chat stream: line pump, preamble hold-back, typed error
 // frames, guardrail abort, final usage/finish chunk.
 function relayStreamingChat({ res, proxyRes, diag, commit, isCommitted, fail, isAborting, cappedAt,
-                              parsedReq, promptTokens, clientDeclinedUsage, reqStart }) {
+                              parsedReq, promptTokensFallback, clientDeclinedUsage, reqStart }) {
   // Real usage needs the forced include_usage upstream; completionText stays a fallback.
   let completionText = "";
   let realUsage = null;   // fm serve's own usage object, if it sent one
@@ -860,22 +802,22 @@ function relayStreamingChat({ res, proxyRes, diag, commit, isCommitted, fail, is
       diag("EMPTY COMPLETION (finished, no output)",
         `rawTail=${JSON.stringify(rawTail)}`);
     }
-    const completionTokens = countCompletionTokens(completionText);
+    // Prefer fm serve's real usage. Counting the text ourselves forks `fm`, so it
+    // happens only when no usage frame arrived at all (a guardrail abort that never
+    // finishes) — never on an ordinary stream.
+    let usage = realUsage;
+    if (!usage) {
+      const pt = promptTokensFallback();
+      const ct = countCompletionTokens(completionText);
+      usage = { prompt_tokens: pt, completion_tokens: ct, total_tokens: pt + ct };
+    }
     // Throughput: generation time is first-token → now; TTFT is request → first-token.
     const nowEnd = Date.now();
     logToks(
-      (parsedReq && parsedReq.model) || "unknown", "stream", completionTokens,
+      (parsedReq && parsedReq.model) || "unknown", "stream", Number(usage.completion_tokens) || 0,
       tFirstToken != null ? nowEnd - tFirstToken : nowEnd - reqStart,
       tFirstToken != null ? tFirstToken - reqStart : null,
     );
-    // Prefer fm serve's real usage over the completionText estimate; the estimate
-    // only fires when no usage frame arrives at all (e.g. a guardrail abort that
-    // never finishes).
-    const usage = realUsage || {
-      prompt_tokens: promptTokens,
-      completion_tokens: completionTokens,
-      total_tokens: promptTokens + completionTokens,
-    };
     const meta = lastChunkMeta || {};
     // Same truncation mislabel as the non-streaming path: fm serve says "stop" even when
     // it stopped at the cap. Only rewrite a plain stop — never an abort's content_filter.
@@ -933,7 +875,7 @@ function applyLengthFinish(obj, cappedAt) {
 }
 
 function relayNonStreamingChat({ res, proxyRes, diag, fail, isAborting, markCommitted,
-                                 parsedReq, promptTokens, reqStart, cappedAt }) {
+                                 parsedReq, promptTokensFallback, reqStart, cappedAt }) {
 // Non-streaming: buffer fully (so we can still retry), then fix usage.
 let raw = "";
 proxyRes.on("data", (c) => (raw += c));
@@ -951,7 +893,8 @@ proxyRes.on("end", () => {
         id: "chatcmpl-proxy", object: "chat.completion",
         model: (parsedReq && parsedReq.model) || "unknown",
         choices: [{ index: 0, message: { role: "assistant", content: "" }, finish_reason: "content_filter" }],
-        usage: { prompt_tokens: promptTokens, completion_tokens: 0, total_tokens: promptTokens },
+        usage: (() => { const pt = promptTokensFallback();
+                        return { prompt_tokens: pt, completion_tokens: 0, total_tokens: pt }; })(),
       };
       outStatus = 200;
     } else if (retryOrSurface(cls, "non-stream", `— ${raw.slice(0, 200)}`, "non-stream error", fail, diag)) {
@@ -996,17 +939,14 @@ const server = http.createServer((req, res) => {
     const reqStart = Date.now();
     const ctx = prepareUpstreamRequest(req, body);
     const { fixed, upstreamHeaders, parsedReq, isChat, isStream,
-            clientDeclinedUsage, breakdown, promptTokens, cappedAt, responseFormatCycle } = ctx;
+            clientDeclinedUsage, promptTokensFallback, cappedAt, responseFormatCycle } = ctx;
 
-    // One-line diagnostic binding a failure to this request's assembled size.
-    const diag = (label, extra = "") => console.error(
-      `[assembled] *** ${label} *** assembled=` +
-      `${breakdown ? breakdown.assembledTotal : "?"} (gauge ${promptTokens})` +
-      (extra ? ` ${extra}` : "")
-    );
+    // One-line failure diagnostic. Success is not logged.
+    const diag = (label, extra = "") =>
+      console.error(`[fm-proxy] *** ${label} ***` + (extra ? ` ${extra}` : ""));
 
     // A cyclic $defs in response_format would hang fm serve PERMANENTLY — only a
-    // restart clears it, and every later request hangs too (Beta 7). Reject it here,
+    // restart clears it, and every later request hangs too. Reject it here,
     // before any upstream connection: a clear 400 invalid_request_error naming the
     // offending definition, so the client can fix the schema instead of poisoning
     // the server.
@@ -1034,7 +974,10 @@ const server = http.createServer((req, res) => {
         },
         (proxyRes) => {
           proxyRes.setEncoding("utf8"); // same multibyte-safety as the request side
-          if (isChat) diag(`UPSTREAM RESPONSE HTTP ${proxyRes.statusCode}`);
+          // Log the status only when it is not a success. A line per healthy request
+          // is noise the operator has to filter back out.
+          if (isChat && proxyRes.statusCode >= 400)
+            diag(`UPSTREAM RESPONSE HTTP ${proxyRes.statusCode}`);
           proxyRes.on("error", (e) => { if (isChat) diag("UPSTREAM RES SOCKET ERROR", `— ${e.message}`); });
 
           // Only intervene on chat completions; everything else passes through.
@@ -1046,7 +989,7 @@ const server = http.createServer((req, res) => {
 
           const g = createAttemptGate({ res, proxyRes, proxyReq, plan, attempt, isStream, diag });
           gate = g;
-          const relay = { res, proxyRes, diag, ...g, parsedReq, promptTokens, reqStart, cappedAt };
+          const relay = { res, proxyRes, diag, ...g, parsedReq, promptTokensFallback, reqStart, cappedAt };
           if (isStream) relayStreamingChat({ ...relay, clientDeclinedUsage });
           else relayNonStreamingChat(relay);
         }

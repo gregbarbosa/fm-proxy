@@ -149,15 +149,14 @@ print(client.chat.completions.create(
 
 ```
 ./fm-launch.sh [options]
-  -v, --verbose          show per-request [assembled] telemetry
   --fm-port <n>          fm serve port          (default 1976)
   --proxy-port <n>       proxy port for clients (default 1977)
   --fm-bin <path>        fm binary              (default /usr/bin/fm)
   --health-timeout <ms>  wait for fm serve      (default 20000)
 ```
 
-`FM_PORT` and `PROXY_PORT` replace the two port options. Errors and the `[toks]`
-throughput counter print without `--verbose`.
+`FM_PORT`, `PROXY_PORT`, and `FM_BIN` replace the matching options. The proxy reads
+`FM_BIN` too, for the `fm count-tokens` fallback.
 
 Run the tests with `node --test`.
 
@@ -171,10 +170,10 @@ Each item below is a live-verified `fm serve` behaviour that breaks OpenAI clien
 | A `$defs`/`$ref` schema returns 400 unless every definition carries Apple's dialect. | Resolves the references inline and removes `$defs`. |
 | A tool whose `function.description` is absent returns 400 for the whole request. | Fills in an empty description. |
 | Streaming usage arrives only when the request sets `stream_options.include_usage`. | Sets the flag upstream and relays the real numbers. |
-| A bare `fm count-tokens` omits the conversation framing, so a count reads 54 low. | Adds the framing back. |
 | A forced `tool_choice` fails permanently on `system`, with a message that reads like a rate limit. | Types it as terminal, so it fails in ~150 ms instead of retrying. |
 | A tool parameter that uses `$ref` loses its structure. | Resolves the references before simplifying. |
-| One nested shape, `array<array<object>>`, cannot be decoded. | Passes it as a JSON string and parses the reply. |
+| A self-referencing `$defs` schema hangs the server permanently. | Rejects it with `400` `cyclic_schema` before opening an upstream connection. |
+| A request that carries `Origin` or `Referer` is refused as cross-site. | Strips that header family on the upstream hop, so browser clients work. |
 
 Apple's error messages are generic, so the proxy gives each one a type. A safety stop
 becomes `finish_reason:"content_filter"` and keeps the partial output. A rate limit
