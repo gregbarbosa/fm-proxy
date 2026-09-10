@@ -4,19 +4,12 @@ const assert = require("node:assert");
 const http = require("node:http");
 const { spawn } = require("node:child_process");
 const path = require("node:path");
-const { fixToolSchema, fixTools, fixResponseFormatSchema, findCyclicDefs, classifyError, errorFrame, fmTokenCount, _isLicenseGate } = require("./fm-proxy.js");
+const { fixToolSchema, fixTools, fixResponseFormatSchema, findCyclicDefs, classifyError, errorFrame, fmTokenCount, _isLicenseGate, stripTemplateMarkers } = require("./fm-proxy.js");
 
-// fm serve (Beta 3 / fm 2.0.59) fixed the GenerationSchema `duplicateType` bug that
-// used to force EVERY nested object through a JSON-string round-trip, and Beta 4
-// (fm 2.0.62) fixed the 3+-chained-object $defs leak. Verified live against a real
-// `fm serve`: flat schemas, object nesting to any chain depth, array<object>, and
-// object -> array -> object all decode correctly and natively now — no round-trip
-// needed. ONE shape is still broken (verified live on Beta 4, not assumed — see
-// needsJsonRoundTrip's comment in fm-proxy.js):
-//   - array<array<object>> (an object reachable through 2+ consecutive array wrappers)
-//     — Beta 4 errors "Failed to parse generated content" (Beta 3 silently omitted
-//     the argument). array<array<number>> (primitive leaf) is fine.
-// That residual shape still uses the lossless JSON-string round-trip.
+// fm serve decodes nested tool parameters natively at every depth, including
+// array<array<object>>. Verified live: flat schemas, object chains of any depth,
+// array<object>, and object -> array -> object all round-trip correctly, so the proxy
+// only strips keywords fm serve rejects outright.
 
 // ── fm count-tokens (renamed from token-count in Beta 4) ─────────────────────
 // fmTokenCount must return an EXACT tokenizer count, not the chars/4.4 heuristic.
@@ -645,7 +638,7 @@ function request(port, opts, payload) {
 // Start a mock fm serve + the real proxy. `upstreamPort = 0` means "point the
 // proxy at a dead port" so its socket error path (502) fires. `handler` receives
 // (mockReq, parsedBody, mockRes) for tests that need to inspect what arrived.
-async function startStack({ handler, deadUpstream = false, maxRetries = 0 } = {}) {
+async function startStack({ handler, deadUpstream = false, maxRetries = 0, env = {} } = {}) {
   const proxyPort = await freePort();
   let upstream = null;
   let lastBody = null;
@@ -675,7 +668,7 @@ async function startStack({ handler, deadUpstream = false, maxRetries = 0 } = {}
 
   const child = spawn(process.execPath, [path.join(__dirname, "fm-proxy.js")], {
     env: { ...process.env, FM_PORT: String(upstreamPort), PROXY_PORT: String(proxyPort),
-           FM_MAX_RETRIES: String(maxRetries), FM_RETRY_BASE_MS: "10", GAUGE_MODE: "msgs" },
+           FM_MAX_RETRIES: String(maxRetries), FM_RETRY_BASE_MS: "10", ...env },
     stdio: ["ignore", "pipe", "pipe"],
   });
   let stderr = "";
@@ -1887,4 +1880,104 @@ test("streaming overflow surfaces the same matchable message", async () => {
     assert.match(res.body, /context length exceeded/i);
     assert.match(res.body, /"code":"context_length_exceeded"/);
   } finally { await stack.stop(); }
+});
+
+// ── template-marker stripping (opt-in) ──────────────────────────────────────
+// fm serve leaks its chat-template control tokens into `content` on most replies to a
+// request that carries `tools`. Stripping is content filtering, which this proxy does
+// not do by default, so it sits behind FM_STRIP_TEMPLATE_MARKERS and defaults to off.
+
+// One chat completion through the proxy under test.
+function chat(stack, { stream }) {
+  return request(stack.proxyPort,
+    { method: "POST", path: "/v1/chat/completions", headers: { "content-type": "application/json" } },
+    JSON.stringify({ model: "system", stream, messages: [{ role: "user", content: "x" }] }));
+}
+
+test("stripTemplateMarkers removes the markers seen live", () => {
+  assert.strictEqual(stripTemplateMarkers("<ctrl46>I am a model.<ctrl46>"), "I am a model.");
+  assert.strictEqual(stripTemplateMarkers("<start_of_turn>model\nhi"), "model\nhi");
+  assert.strictEqual(stripTemplateMarkers("a<end_of_turn>b"), "ab");
+  assert.strictEqual(stripTemplateMarkers("<|im_start|>x"), "x");
+});
+
+test("stripTemplateMarkers leaves ordinary text alone", () => {
+  for (const s of ["", "plain text", "1 < 2 and 3 > 2", "<div>html</div>", "a<b>c</b>"]) {
+    assert.strictEqual(stripTemplateMarkers(s), s);
+  }
+});
+
+test("stripTemplateMarkers is a no-op on a non-string", () => {
+  assert.strictEqual(stripTemplateMarkers(null), null);
+  assert.strictEqual(stripTemplateMarkers(undefined), undefined);
+});
+
+test("non-streaming: markers survive by default", async (t) => {
+  const stack = await startStack({
+    handler: (req, parsed, res) => {
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify({ id: "x", object: "chat.completion", model: "system",
+        choices: [{ index: 0, message: { role: "assistant", content: "<ctrl46>hi<ctrl46>" }, finish_reason: "stop" }],
+        usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 } }));
+    },
+  });
+  t.after(() => stack.stop());
+  const r = await chat(stack, { stream: false });
+  assert.strictEqual(JSON.parse(r.body).choices[0].message.content, "<ctrl46>hi<ctrl46>");
+});
+
+test("non-streaming: the flag strips markers from content", async (t) => {
+  const stack = await startStack({
+    env: { FM_STRIP_TEMPLATE_MARKERS: "1" },
+    handler: (req, parsed, res) => {
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify({ id: "x", object: "chat.completion", model: "system",
+        choices: [{ index: 0, message: { role: "assistant", content: "<ctrl46>hi<ctrl46>" }, finish_reason: "stop" }],
+        usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 } }));
+    },
+  });
+  t.after(() => stack.stop());
+  const r = await chat(stack, { stream: false });
+  assert.strictEqual(JSON.parse(r.body).choices[0].message.content, "hi");
+});
+
+test("streaming: the flag strips markers and keeps the frame parseable", async (t) => {
+  const stack = await startStack({
+    env: { FM_STRIP_TEMPLATE_MARKERS: "1" },
+    handler: (req, parsed, res) => {
+      res.writeHead(200, { "content-type": "text/event-stream" });
+      const chunk = (d) => res.write(`data: ${JSON.stringify(d)}\n\n`);
+      chunk({ id: "x", object: "chat.completion.chunk", model: "system",
+              choices: [{ index: 0, delta: { content: "<ctrl46>ok" } }] });
+      chunk({ id: "x", object: "chat.completion.chunk", model: "system",
+              choices: [{ index: 0, delta: { content: "$& done<ctrl46>" }, finish_reason: "stop" }] });
+      res.write("data: [DONE]\n\n");
+      res.end();
+    },
+  });
+  t.after(() => stack.stop());
+  const r = await chat(stack, { stream: true });
+  let text = "";
+  for (const line of r.body.split("\n")) {
+    if (!line.startsWith("data: ") || line.includes("[DONE]")) continue;
+    const j = JSON.parse(line.slice(6)); // must parse: pins the $& corruption bug
+    const d = j.choices && j.choices[0] && j.choices[0].delta;
+    if (d && typeof d.content === "string") text += d.content;
+  }
+  assert.strictEqual(text, "ok$& done", "markers gone, literal $& preserved");
+});
+
+test("streaming: markers survive by default", async (t) => {
+  const stack = await startStack({
+    handler: (req, parsed, res) => {
+      res.writeHead(200, { "content-type": "text/event-stream" });
+      res.write(`data: ${JSON.stringify({ id: "x", object: "chat.completion.chunk", model: "system",
+        choices: [{ index: 0, delta: { content: "<ctrl46>ok" }, finish_reason: "stop" }] })}\n\n`);
+      res.write("data: [DONE]\n\n");
+      res.end();
+    },
+  });
+  t.after(() => stack.stop());
+  const r = await chat(stack, { stream: true });
+  assert.ok(r.body.includes("<ctrl46>ok"), "default must not filter content");
 });

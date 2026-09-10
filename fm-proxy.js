@@ -15,6 +15,22 @@ const PROXY_PORT = Number(process.env.PROXY_PORT) || 1977;
 // force the heuristic token count, which is what makes a test run deterministic.
 const FM_BIN = process.env.FM_BIN || "/usr/bin/fm";
 
+// fm serve leaks its chat-template control tokens into `content` on most replies to a
+// request that carries `tools`: `<start_of_turn>`, `<ctrl46>` and friends. Stripping
+// them is content filtering, and this proxy otherwise corrects only envelopes and
+// schemas, so it is opt-in and off by default. Set FM_STRIP_TEMPLATE_MARKERS=1.
+//
+// Leaving it off keeps an audit honest: the markers are how you detect the upstream bug.
+const STRIP_MARKERS = process.env.FM_STRIP_TEMPLATE_MARKERS === "1";
+// Only the template's own delimiters. `<ctrl\d+>` and `<|...|>` are single tokens in the
+// vocabulary, so they arrive whole in one delta and never straddle a chunk boundary
+// (verified live over 8 streaming runs). Anything looser would eat ordinary markup.
+const TEMPLATE_MARKER = /<start_of_turn>|<end_of_turn>|<ctrl\d+>|<\|[^|>]*\|>/g;
+function stripTemplateMarkers(text) {
+  if (typeof text !== "string" || !text) return text;
+  return text.replace(TEMPLATE_MARKER, "");
+}
+
 // fm serve has DISTINCT failure modes this proxy must not conflate (see
 // classifyError): transient rate-limits are retried with backoff; safety-guardrail
 // aborts, forced-tool_choice rejections and HTTP 400s are deterministic + terminal
@@ -488,7 +504,7 @@ function retryOrSurface(cls, ctxLabel, extra, reason, fail, diag) {
 
 // Exported for tests when required as a module; harmless when run directly.
 if (require.main !== module) {
-  module.exports = { fixTools, fixToolSchema, fixResponseFormatSchema, findCyclicDefs, classifyError, errorFrame, fmTokenCount, _isLicenseGate };
+  module.exports = { fixTools, fixToolSchema, fixResponseFormatSchema, findCyclicDefs, classifyError, errorFrame, fmTokenCount, _isLicenseGate, stripTemplateMarkers };
 }
 
 // CORS for browser clients; `*` by default, override with CORS_ORIGIN, on every response.
@@ -717,6 +733,18 @@ function relayStreamingChat({ res, proxyRes, diag, commit, isCommitted, fail, is
             const delta = ch0 && ch0.delta;
             if (delta && typeof delta.content === "string") {
               if (tFirstToken == null) tFirstToken = Date.now();
+              if (STRIP_MARKERS) {
+                const clean = stripTemplateMarkers(delta.content);
+                if (clean !== delta.content) {
+                  delta.content = clean;
+                  // Same in-place rewrite, and the same function replacement, as the
+                  // held-finish_reason path above: a string replacement would expand
+                  // $& out of the completion text and corrupt the frame.
+                  line = line.replace(payload, () => JSON.stringify(obj));
+                }
+              }
+              // Accumulate what the client actually receives, so the usage fallback
+              // counts the relayed text rather than the raw upstream text.
               completionText += delta.content; producedOutput = true; meaningful = true;
             }
             // Tool-call deltas are real output too: mark the stream meaningful so an
@@ -908,7 +936,10 @@ proxyRes.on("end", () => {
   let out = raw;
   if (obj) {
     // fm serve's non-streaming usage is accurate — pass it through untouched.
-    const msg = obj.choices && obj.choices[0] && obj.choices[0].message;
+    if (STRIP_MARKERS) {
+      const msg = obj.choices && obj.choices[0] && obj.choices[0].message;
+      if (msg && typeof msg.content === "string") msg.content = stripTemplateMarkers(msg.content);
+    }
     applyLengthFinish(obj, cappedAt);
     out = JSON.stringify(obj);
   }

@@ -230,8 +230,18 @@ Beta 7 and Beta 8 recorded clean JSON here. The leak is intermittent, so it is e
 in the RC or it was missed earlier. Send at least 10 requests before calling this clean
 on any build.
 
-The proxy does not strip the markers, because it corrects envelopes and schemas and does
-not filter content. A client that parses `content` must strip them itself.
+Stripping is opt-in. Set `FM_STRIP_TEMPLATE_MARKERS=1` and the proxy removes the markers
+from `content` on both paths. It is off by default for two reasons: the proxy otherwise
+corrects only envelopes and schemas and does not filter content, and the markers are the
+signal an audit uses to detect the upstream bug.
+
+Verified live on the RC. With the flag off, 8 of 10 replies leaked. With it on, 0 of 10
+leaked over the non-streaming path and 0 markers appeared across 4 streaming runs, while
+the rate at which replies carried a real tool call did not change.
+
+The markers are single tokens in the vocabulary, so each arrives whole in one delta and
+never straddles a chunk boundary. That is why a per-delta regex is enough and no
+hold-back buffer is needed.
 
 #### Operational notes
 
