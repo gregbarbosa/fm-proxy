@@ -64,11 +64,18 @@ const record = (id, what, handled, evidence) => { RESULTS.push({ id, what, handl
     tools: [{ type: "function", function: { name: "set_home", description: "Set home", parameters: { type: "object", properties: { home: { $ref: "#/$defs/Ad" } }, required: ["home"], $defs: { Ad: { type: "object", properties: { city: { type: "string" } }, required: ["city"] } } } } }] });
   record(5, "$ref in tool parameters accepted", r.status === 200, `status=${r.status}`);
 
-  // 6. tool_choice:"required" is permanently rejected by the system engine. A proxy
-  //    that treats it as transient burns a long backoff before surfacing it.
+  // 6. fm serve answers a forced tool_choice with 500 "unsupported generation guide".
+  //    A proxy must not forward it: it can translate the forced call into a
+  //    response_format schema and let constrained decoding make the call instead.
+  //    This asserts a REAL tool_call comes back, not merely that the failure is quick.
   r = await chat({ model: "system", messages: M, tools: [TOOL], tool_choice: "required", max_tokens: 20 }, 45000);
   j = J(r);
-  record(6, "forced tool_choice fails fast", r.ms < 8000, `${r.ms}ms status=${r.status} type=${j?.error?.type || "-"}`);
+  const call6 = j?.choices?.[0]?.message?.tool_calls?.[0];
+  let args6 = false;
+  try { JSON.parse(call6.function.arguments); args6 = true; } catch {}
+  record(6, "forced tool_choice produces a real tool_call",
+    r.status === 200 && call6?.function?.name === TOOL.function.name && args6,
+    `${r.ms}ms status=${r.status} name=${call6?.function?.name || "-"} argsValidJSON=${args6}`);
 
   // 7. Browser clients need CORS; fm serve does not provide usable cross-origin access.
   r = await req("/v1/chat/completions", null, "OPTIONS", { origin: "https://example.com", "access-control-request-method": "POST" }, 8000);

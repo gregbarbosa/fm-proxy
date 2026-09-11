@@ -194,7 +194,7 @@ what `fm serve` does; do not re-derive it from the release history below.
 |---|---|
 | Tool calling | Never populates `tool_calls`. `finish_reason` is `stop`. |
 | Tool-call content | Leaks raw chat-template markers. See below. |
-| Forced `tool_choice` | `500 An unsupported generation guide was used.` |
+| Forced `tool_choice` | `500 An unsupported generation guide was used.` The proxy routes around it. |
 | Tool with no `function.description` | `400` for the whole request |
 | `stream` omitted | Returns `text/event-stream`, not one JSON object |
 | `n > 1` | `400 n=2 is not supported.` |
@@ -244,6 +244,41 @@ the rate at which replies carried a real tool call did not change.
 The markers are single tokens in the vocabulary, so each arrives whole in one delta and
 never straddles a chunk boundary. That is why a per-delta regex is enough and no
 hold-back buffer is needed.
+
+#### Forced tool calling works, through a schema
+
+`fm serve` never populates `tool_calls`, and it rejects a forced `tool_choice` with
+`500 An unsupported generation guide was used.` It does honour `response_format`, so the
+proxy translates a forced call instead of forwarding it.
+
+`buildToolDispatch` turns each offered function into a property of one object schema.
+`tool_choice: "required"` offers every tool and requires none of them, so any single key
+satisfies the schema. A named function offers only that one and requires it. The request
+then carries no `tools` and no `tool_choice`, only the schema and a short instruction.
+`dispatchToToolCalls` turns the reply back into OpenAI `tool_calls`.
+
+Measured on the 27.0 RC, before the code was written and again after:
+
+| Mode | Result | Prompt tokens |
+|---|---|---|
+| `tool_choice: "required"`, one tool | 4 of 4 called | 114 |
+| `tool_choice: "required"`, two tools | 8 of 8, routed to the right one | 119 to 122 |
+| Named function | 4 of 4 called | 111 |
+| Native `tools`, auto | 0 `tool_calls`, markers leak | 256 |
+
+**Auto is deliberately not translated.** Auto must be able to answer without calling a
+tool, so the schema needs a prose escape. Give the model that escape and it always takes
+it: 0 of 25 in testing, even when the prompt named the function. Removing the escape is
+what makes selection work, and that is only honest when the caller has already said a
+tool is required.
+
+A streaming client is served from a buffered reply. A dispatched reply is one JSON object
+and cannot name a tool until it has arrived whole, so the proxy asks `fm serve` for a
+non-streaming reply and synthesises the SSE frames. Arguments go out in 64-character
+pieces, so a client that concatenates `function.arguments` across deltas gets valid JSON.
+
+Caution: a forced tool call and a caller's own `response_format` cannot both hold. The
+dispatch schema wins.
 
 #### Operational notes
 

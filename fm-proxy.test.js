@@ -4,7 +4,7 @@ const assert = require("node:assert");
 const http = require("node:http");
 const { spawn } = require("node:child_process");
 const path = require("node:path");
-const { fixToolSchema, fixTools, fixResponseFormatSchema, findCyclicDefs, classifyError, errorFrame, fmTokenCount, _isLicenseGate, stripTemplateMarkers, truncateAtStop } = require("./fm-proxy.js");
+const { fixToolSchema, fixTools, fixResponseFormatSchema, findCyclicDefs, classifyError, errorFrame, fmTokenCount, _isLicenseGate, stripTemplateMarkers, truncateAtStop, buildToolDispatch, dispatchToToolCalls } = require("./fm-proxy.js");
 
 // fm serve decodes nested tool parameters natively at every depth, including
 // array<array<object>>. Verified live: flat schemas, object chains of any depth,
@@ -2158,4 +2158,211 @@ test("reasoning_effort is dropped: it can never succeed with pcc gone", () => {
     model: "system", messages: [{ role: "user", content: "hi" }], reasoning_effort: "low",
   }));
   assert.strictEqual("reasoning_effort" in JSON.parse(body), false);
+});
+
+// ── forced tool dispatch ────────────────────────────────────────────────────
+// fm serve rejects a forced tool_choice with 500 "unsupported generation guide", but
+// it does honour response_format. buildToolDispatch translates the forced call into a
+// schema, so constrained decoding does the work the tool parser cannot.
+// Measured on the 27.0 RC before this was written: forced 5/5, and with two tools and
+// no prose escape the model routed correctly 10/10.
+
+test("buildToolDispatch returns null unless a tool_choice is forced", () => {
+  const tools = [{ type: "function", function: { name: "f", description: "d",
+    parameters: { type: "object", properties: { a: { type: "string" } }, required: ["a"] } } }];
+  assert.strictEqual(buildToolDispatch({ tools }), null, "no tool_choice");
+  assert.strictEqual(buildToolDispatch({ tools, tool_choice: "auto" }), null, "auto self-selects");
+  assert.strictEqual(buildToolDispatch({ tools, tool_choice: "none" }), null);
+  assert.strictEqual(buildToolDispatch({ tool_choice: "required" }), null, "no tools");
+  assert.strictEqual(buildToolDispatch({ tools: [], tool_choice: "required" }), null);
+});
+
+test("buildToolDispatch on 'required' offers every tool and no prose escape", () => {
+  const tools = [
+    { type: "function", function: { name: "get_weather", description: "W",
+      parameters: { type: "object", properties: { city: { type: "string" } }, required: ["city"] } } },
+    { type: "function", function: { name: "send_email", description: "E",
+      parameters: { type: "object", properties: { to: { type: "string" } }, required: ["to"] } } },
+  ];
+  const d = buildToolDispatch({ tools, tool_choice: "required" });
+  assert.deepStrictEqual(Object.keys(d.schema.properties), ["get_weather", "send_email"]);
+  assert.deepStrictEqual(d.schema.required, [], "any one tool satisfies 'required'");
+  assert.deepStrictEqual(d.toolNames, ["get_weather", "send_email"]);
+  assert.strictEqual(d.schema.properties.get_weather.properties.city.type, "string");
+});
+
+test("buildToolDispatch on a named function offers only that one, and requires it", () => {
+  const tools = [
+    { type: "function", function: { name: "a", description: "A", parameters: { type: "object", properties: { x: { type: "string" } }, required: ["x"] } } },
+    { type: "function", function: { name: "b", description: "B", parameters: { type: "object", properties: { y: { type: "string" } }, required: ["y"] } } },
+  ];
+  const d = buildToolDispatch({ tools, tool_choice: { type: "function", function: { name: "b" } } });
+  assert.deepStrictEqual(Object.keys(d.schema.properties), ["b"]);
+  assert.deepStrictEqual(d.schema.required, ["b"]);
+});
+
+test("buildToolDispatch is null when the named function is not in tools", () => {
+  const tools = [{ type: "function", function: { name: "a", description: "A", parameters: { type: "object", properties: {}, required: [] } } }];
+  assert.strictEqual(buildToolDispatch({ tools, tool_choice: { type: "function", function: { name: "nope" } } }), null);
+});
+
+test("dispatchToToolCalls turns the model's JSON into OpenAI tool_calls", () => {
+  const out = dispatchToToolCalls('{"get_weather": {"city": "Paris"}}', ["get_weather", "send_email"]);
+  assert.strictEqual(out.tool_calls.length, 1);
+  assert.strictEqual(out.tool_calls[0].type, "function");
+  assert.strictEqual(out.tool_calls[0].function.name, "get_weather");
+  assert.deepStrictEqual(JSON.parse(out.tool_calls[0].function.arguments), { city: "Paris" });
+  assert.match(out.tool_calls[0].id, /^call_/);
+});
+
+test("dispatchToToolCalls returns null on anything it cannot use", () => {
+  assert.strictEqual(dispatchToToolCalls("not json", ["f"]), null);
+  assert.strictEqual(dispatchToToolCalls('{"unknown": {}}', ["f"]), null, "key is not a tool");
+  assert.strictEqual(dispatchToToolCalls("{}", ["f"]), null, "no key at all");
+  assert.strictEqual(dispatchToToolCalls('"a string"', ["f"]), null);
+});
+
+test("fixTools rewrites a forced request into a response_format schema", () => {
+  const { body, parsed, dispatch } = fixTools(JSON.stringify({
+    model: "system", messages: [{ role: "user", content: "Weather in Paris?" }],
+    tools: [{ type: "function", function: { name: "get_weather", description: "W",
+      parameters: { type: "object", properties: { city: { type: "string" } }, required: ["city"] } } }],
+    tool_choice: "required",
+  }));
+  const up = JSON.parse(body);
+  assert.strictEqual("tools" in up, false, "tools must not reach fm serve");
+  assert.strictEqual("tool_choice" in up, false, "tool_choice is what 500s");
+  assert.strictEqual(up.response_format.type, "json_schema");
+  assert.ok(up.response_format.json_schema.schema.properties.get_weather);
+  assert.strictEqual(up.messages[0].role, "system", "the contract is injected");
+  assert.match(up.messages[0].content, /MUST call exactly one/);
+  assert.deepStrictEqual(dispatch.toolNames, ["get_weather"]);
+});
+
+// A regression guard for a mistake made three times: a field stripped from the upstream
+// body, then re-attached to `parsed`. Callers re-serialise `parsed` (to force
+// stream_options, to apply a cap, to force stream:false for a dispatch), so anything
+// left on it goes straight back on the wire. Both stub suites stayed green while every
+// live request failed. Nothing the relay needs may live on `parsed`.
+test("no field fm serve rejects survives on the parsed object", () => {
+  const { parsed } = fixTools(JSON.stringify({
+    model: "system", messages: [{ role: "user", content: "x" }],
+    stop: ["X"], reasoning_effort: "low",
+    tools: [{ type: "function", function: { name: "f", description: "d",
+      parameters: { type: "object", properties: {}, required: [] } } }],
+    tool_choice: "required",
+  }));
+  for (const field of ["stop", "reasoning_effort", "tool_choice", "tools"]) {
+    assert.strictEqual(field in parsed, false,
+      `${field} must not survive on parsed: a later JSON.stringify(parsed) would forward it`);
+  }
+});
+
+test("fixTools leaves an auto tool request exactly as it is today", () => {
+  const req = { model: "system", messages: [{ role: "user", content: "hi" }],
+    tools: [{ type: "function", function: { name: "f", description: "d",
+      parameters: { type: "object", properties: { a: { type: "string" } }, required: ["a"] } } }],
+    tool_choice: "auto" };
+  const { body, dispatch } = fixTools(JSON.stringify(req));
+  const up = JSON.parse(body);
+  assert.strictEqual(dispatch, null);
+  assert.ok(up.tools, "auto still forwards tools natively");
+  assert.strictEqual("response_format" in up, false);
+});
+
+test("a forced request keeps a caller's own response_format out of the way", () => {
+  const { body } = fixTools(JSON.stringify({
+    model: "system", messages: [{ role: "user", content: "x" }],
+    tools: [{ type: "function", function: { name: "f", description: "d",
+      parameters: { type: "object", properties: {}, required: [] } } }],
+    tool_choice: "required",
+    response_format: { type: "json_schema", json_schema: { name: "Mine", schema: { type: "object", properties: { z: { type: "string" } } } } },
+  }));
+  const up = JSON.parse(body);
+  assert.strictEqual(up.response_format.json_schema.name, "ToolDispatch",
+    "the dispatch schema wins; a forced tool call and a caller schema cannot both hold");
+});
+
+// The stub returns what fm serve returns for a dispatched request: the schema object
+// as a JSON string in `content`.
+function dispatchStack(content, { stream = false } = {}) {
+  return startStack({ handler: (req, parsed, res) => {
+    if (stream) {
+      res.writeHead(200, { "content-type": "text/event-stream" });
+      res.write(`data: ${JSON.stringify({ id: "x", object: "chat.completion.chunk", model: "system",
+        choices: [{ index: 0, delta: { content }, finish_reason: "stop" }] })}\n\n`);
+      res.write("data: [DONE]\n\n");
+      return res.end();
+    }
+    res.writeHead(200, { "content-type": "application/json" });
+    res.end(JSON.stringify({ id: "x", object: "chat.completion", model: "system",
+      choices: [{ index: 0, message: { role: "assistant", content }, finish_reason: "stop" }],
+      usage: { prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 } }));
+  } });
+}
+const FORCED_REQ = (stream) => JSON.stringify({
+  model: "system", stream,
+  messages: [{ role: "user", content: "Weather in Paris?" }],
+  tools: [{ type: "function", function: { name: "get_weather", description: "W",
+    parameters: { type: "object", properties: { city: { type: "string" } }, required: ["city"] } } }],
+  tool_choice: "required",
+});
+const postChat = (stack, body) => request(stack.proxyPort,
+  { method: "POST", path: "/v1/chat/completions", headers: { "content-type": "application/json" } }, body);
+
+test("non-streaming: a dispatched reply comes back as real tool_calls", async (t) => {
+  const stack = await dispatchStack('{"get_weather": {"city": "Paris"}}');
+  t.after(() => stack.stop());
+  const j = JSON.parse((await postChat(stack, FORCED_REQ(false))).body);
+  const msg = j.choices[0].message;
+  assert.strictEqual(msg.tool_calls.length, 1);
+  assert.strictEqual(msg.tool_calls[0].function.name, "get_weather");
+  assert.deepStrictEqual(JSON.parse(msg.tool_calls[0].function.arguments), { city: "Paris" });
+  assert.strictEqual(msg.content, null, "OpenAI sends null content alongside tool_calls");
+  assert.strictEqual(j.choices[0].finish_reason, "tool_calls");
+});
+
+test("non-streaming: an unusable dispatch reply is relayed, not invented into a call", async (t) => {
+  const stack = await dispatchStack("I cannot do that.");
+  t.after(() => stack.stop());
+  const j = JSON.parse((await postChat(stack, FORCED_REQ(false))).body);
+  assert.strictEqual(j.choices[0].message.tool_calls, undefined);
+  assert.strictEqual(j.choices[0].message.content, "I cannot do that.");
+});
+
+test("streaming: a dispatched reply is synthesised into tool_call deltas", async (t) => {
+  // The stub asserts the proxy asked upstream for a NON-streaming reply: tool_calls
+  // cannot be emitted until the whole JSON object has arrived and parsed.
+  const stack = await dispatchStack('{"get_weather": {"city": "Paris"}}');
+  t.after(() => stack.stop());
+  const r = await postChat(stack, FORCED_REQ(true));
+  assert.match(r.headers["content-type"] || "", /text\/event-stream/);
+  assert.strictEqual(stack.getLastBody().stream, false, "must not stream a dispatched request upstream");
+
+  const frames = [];
+  for (const line of r.body.split("\n")) {
+    if (line.startsWith("data: ") && !line.includes("[DONE]")) frames.push(JSON.parse(line.slice(6)));
+  }
+  assert.ok(r.body.trimEnd().endsWith("data: [DONE]"), "stream must terminate properly");
+  const calls = frames.flatMap((f) => f.choices?.[0]?.delta?.tool_calls ?? []);
+  assert.ok(calls.length > 0, "at least one tool_calls delta");
+  assert.strictEqual(calls[0].function.name, "get_weather");
+  assert.strictEqual(calls[0].index, 0);
+  const args = calls.map((c) => c.function?.arguments ?? "").join("");
+  assert.deepStrictEqual(JSON.parse(args), { city: "Paris" });
+  const finish = frames.map((f) => f.choices?.[0]?.finish_reason).filter(Boolean);
+  assert.deepStrictEqual(finish, ["tool_calls"], "exactly one finish_reason, and it is tool_calls");
+});
+
+test("streaming: an unusable dispatched reply still streams as content", async (t) => {
+  const stack = await dispatchStack("I cannot do that.");
+  t.after(() => stack.stop());
+  const r = await postChat(stack, FORCED_REQ(true));
+  let text = "";
+  for (const line of r.body.split("\n")) {
+    if (!line.startsWith("data: ") || line.includes("[DONE]")) continue;
+    const d = JSON.parse(line.slice(6)).choices?.[0]?.delta;
+    if (d && typeof d.content === "string") text += d.content;
+  }
+  assert.strictEqual(text, "I cannot do that.");
 });

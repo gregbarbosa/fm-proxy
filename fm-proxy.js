@@ -413,6 +413,73 @@ function fixResponseFormatSchema(schema) {
   return collapseTypeArraysDeep(schema);
 }
 
+// ── forced tool dispatch ────────────────────────────────────────────────────
+// fm serve answers a forced `tool_choice` with `500 An unsupported generation guide was
+// used.` It does honour `response_format`, so a forced call is translated into a schema
+// and constrained decoding does the work the broken tool parser cannot.
+//
+// Measured on the 27.0 RC, 5 runs each, before this was written:
+//   forced named function                     5/5 called, 98 prompt tokens
+//   "required", 2 tools, no prose escape     10/10 correct routing, ~105 tokens
+//   auto, with a prose escape                 0/25 — the model always took the escape
+//   native tools for the same request         0 tool_calls, 256 tokens, markers leaked
+//
+// Auto is deliberately NOT translated. Removing the prose escape is what makes the
+// model select a tool, and auto must be able to answer without calling one.
+const DISPATCH_INSTRUCTION = (names) =>
+  "You have access to external functions. You MUST call exactly one of them: " +
+  names.map((n) => `"${n}"`).join(", ") + ".\n" +
+  "Respond with a JSON object whose single key is that function's name and whose value " +
+  "is that function's arguments object. Never add other keys.";
+
+// Returns a dispatch plan, or null when this request must not be translated.
+function buildToolDispatch(parsed) {
+  const tools = parsed && Array.isArray(parsed.tools) ? parsed.tools : null;
+  if (!tools || !tools.length) return null;
+  const choice = parsed.tool_choice;
+  const named = choice && typeof choice === "object" && choice.type === "function"
+    ? choice.function && choice.function.name
+    : null;
+  if (choice !== "required" && !named) return null;   // auto, none, or absent
+
+  const fns = tools.map((t) => t && t.function).filter((f) => f && f.name);
+  const chosen = named ? fns.filter((f) => f.name === named) : fns;
+  if (!chosen.length) return null;                    // named a function we were not given
+
+  const properties = {};
+  for (const f of chosen) {
+    const params = f.parameters || {};
+    const prop = { type: "object", properties: params.properties || {} };
+    if (Array.isArray(params.required)) prop.required = params.required;
+    if (f.description) prop.description = f.description;
+    properties[f.name] = prop;
+  }
+  return {
+    schema: { type: "object", properties, required: named ? [named] : [] },
+    instruction: DISPATCH_INSTRUCTION(chosen.map((f) => f.name)),
+    toolNames: chosen.map((f) => f.name),
+  };
+}
+
+// Turn the model's schema-constrained reply into OpenAI `tool_calls`. Null when the
+// content is not a usable dispatch object, so the caller can relay it untouched rather
+// than invent a call.
+function dispatchToToolCalls(content, toolNames) {
+  let obj = null;
+  try { obj = JSON.parse(content); } catch { return null; }
+  if (!obj || typeof obj !== "object" || Array.isArray(obj)) return null;
+  const name = Object.keys(obj).find((k) => toolNames.includes(k));
+  if (!name) return null;
+  const args = obj[name];
+  return {
+    tool_calls: [{
+      id: "call_" + Math.random().toString(36).slice(2, 12),
+      type: "function",
+      function: { name, arguments: JSON.stringify(args == null ? {} : args) },
+    }],
+  };
+}
+
 // Rewrite tools into fm-serve-compatible schemas; returns body and parsed req.
 function fixTools(body) {
   try {
@@ -432,6 +499,25 @@ function fixTools(body) {
     // `system` it can only ever 400. Drop it rather than fail a request over a field
     // that has no effect either way.
     delete parsed.reasoning_effort;
+    // A forced tool_choice 500s upstream. Translate it into a schema instead, and let
+    // constrained decoding pick the tool. Done before the tool-schema rewrite below,
+    // because a dispatched request forwards no `tools` at all.
+    const dispatch = buildToolDispatch(parsed);
+    if (dispatch) {
+      const instr = { role: "system", content: dispatch.instruction };
+      const msgs = Array.isArray(parsed.messages) ? parsed.messages : [];
+      const sysIdx = msgs.findIndex((m) => m && m.role === "system");
+      if (sysIdx >= 0) msgs[sysIdx] = { ...msgs[sysIdx],
+        content: `${dispatch.instruction}\n\n${msgs[sysIdx].content ?? ""}` };
+      else msgs.unshift(instr);
+      parsed.messages = msgs;
+      // The caller's own response_format cannot survive: the reply must be the dispatch
+      // object. A forced tool call and a caller schema are mutually exclusive requests.
+      parsed.response_format = { type: "json_schema",
+        json_schema: { name: "ToolDispatch", schema: dispatch.schema } };
+      delete parsed.tools;
+      delete parsed.tool_choice;
+    }
     if (parsed.tools) {
       parsed.tools = parsed.tools.map((tool) => {
         const schema = fixToolSchema(tool.function?.parameters);
@@ -468,7 +554,12 @@ function fixTools(body) {
     // `stop` is returned on its own, NEVER re-attached to `parsed`. Callers re-serialise
     // `parsed` later (to force stream_options, or to apply a cap), and anything left on
     // it goes back on the wire — which is how `stop` reached fm serve and 400'd.
-    return { body: JSON.stringify(parsed), parsed, stopSequences };
+    // NOTHING is re-attached to `parsed`. Callers re-serialise it later — to force
+    // stream_options, to apply a cap, or to force stream:false for a dispatch — and
+    // anything left on it goes back on the wire. That mistake put `stop` and then
+    // `tool_choice` in front of fm serve and 400'd/500'd the request while the stub
+    // tests stayed green. A value the relay needs is RETURNED, never re-attached.
+    return { body: JSON.stringify(parsed), parsed, stopSequences, dispatch };
   } catch {
     return { body, parsed: null };
   }
@@ -579,7 +670,7 @@ function retryOrSurface(cls, ctxLabel, extra, reason, fail, diag) {
 
 // Exported for tests when required as a module; harmless when run directly.
 if (require.main !== module) {
-  module.exports = { fixTools, fixToolSchema, fixResponseFormatSchema, findCyclicDefs, classifyError, errorFrame, fmTokenCount, _isLicenseGate, stripTemplateMarkers, truncateAtStop };
+  module.exports = { fixTools, fixToolSchema, fixResponseFormatSchema, findCyclicDefs, classifyError, errorFrame, fmTokenCount, _isLicenseGate, stripTemplateMarkers, truncateAtStop, buildToolDispatch, dispatchToToolCalls };
 }
 
 // CORS for browser clients; `*` by default, override with CORS_ORIGIN, on every response.
@@ -638,9 +729,14 @@ function createRetryPlan(res, diag, fire) {
 // Build the upstream payload and the per-request context: schema rewrites, stream
 // fixups, header scrubbing, and the lazy token-count fallback.
 function prepareUpstreamRequest(req, body) {
-  const { body: toolFixed, parsed: parsedReq, responseFormatCycle, stopSequences } = fixTools(body);
+  const { body: toolFixed, parsed: parsedReq, responseFormatCycle, stopSequences, dispatch } = fixTools(body);
 
   const isChat = !!(req.url && req.url.includes("/chat/completions"));
+  // A dispatched reply is one JSON object and cannot become `tool_calls` until it has
+  // arrived whole and parsed. So ask fm serve for a non-streaming reply even when the
+  // client wants SSE, and synthesise the stream on the way back out.
+  const dispatchStreamOut = !!(dispatch && parsedReq && parsedReq.stream);
+  if (dispatchStreamOut) parsedReq.stream = false;
   const isStream = !!(parsedReq && parsedReq.stream);
 
   // fm serve sends a real usage chunk on streaming only when the request opts in via
@@ -669,6 +765,7 @@ function prepareUpstreamRequest(req, body) {
     if (Number.isFinite(cap)) cappedAt = cap;
   }
   let fixed = toolFixed;
+  if (dispatchStreamOut) fixed = JSON.stringify(parsedReq);
   if (cappedAt != null && parsedReq) fixed = JSON.stringify(parsedReq);
   if (isStream && parsedReq) {
     parsedReq.stream_options = { ...(parsedReq.stream_options || {}), include_usage: true };
@@ -703,7 +800,7 @@ function prepareUpstreamRequest(req, body) {
     if (h === "origin" || h === "referer" || h.startsWith("sec-fetch-")) delete upstreamHeaders[h];
   }
   return { fixed, upstreamHeaders, parsedReq, isChat, isStream,
-           clientDeclinedUsage, promptTokensFallback, cappedAt, responseFormatCycle, stopSequences };
+           clientDeclinedUsage, promptTokensFallback, cappedAt, responseFormatCycle, stopSequences, dispatch, dispatchStreamOut };
 }
 
 // ── Attempt gate ───────────────────────────────────────────────────────────
@@ -990,6 +1087,46 @@ function relayStreamingChat({ res, proxyRes, diag, commit, isCommitted, fail, is
   });
 }
 
+// Turn one buffered completion into the SSE frames a streaming client expects. Used
+// only for a dispatched request, where the reply had to be parsed whole before any
+// `tool_calls` could be named.
+const ARG_CHUNK = 64;
+function emitSynthesisedStream(res, obj, status, upstreamHeaders) {
+  res.writeHead(status, {
+    ...CORS_HEADERS,
+    "content-type": "text/event-stream; charset=utf-8",
+    "cache-control": "no-cache, no-transform",
+    connection: "keep-alive",
+  });
+  const ch = obj.choices && obj.choices[0] ? obj.choices[0] : {};
+  const meta = { id: obj.id || "chatcmpl-proxy", object: "chat.completion.chunk",
+                 created: obj.created || Math.floor(Date.now() / 1000),
+                 model: obj.model || "system" };
+  const send = (delta, extra) => res.write(`data: ${JSON.stringify({ ...meta,
+    choices: [{ index: 0, delta, ...(extra || {}) }] })}\n\n`);
+
+  send({ role: "assistant" });
+  const calls = ch.message && ch.message.tool_calls;
+  if (Array.isArray(calls) && calls.length) {
+    calls.forEach((tc, i) => {
+      // The opening delta names the call; the rest carry only argument text, which is
+      // the shape OpenAI streams and what SDKs accumulate on.
+      send({ tool_calls: [{ index: i, id: tc.id, type: "function",
+                            function: { name: tc.function.name, arguments: "" } }] });
+      const args = tc.function.arguments || "";
+      for (let p = 0; p < args.length; p += ARG_CHUNK) {
+        send({ tool_calls: [{ index: i, function: { arguments: args.slice(p, p + ARG_CHUNK) } }] });
+      }
+    });
+  } else if (ch.message && typeof ch.message.content === "string" && ch.message.content) {
+    send({ content: ch.message.content });
+  }
+  res.write(`data: ${JSON.stringify({ ...meta, choices: [{ index: 0, delta: {},
+    finish_reason: ch.finish_reason || "stop" }], usage: obj.usage })}\n\n`);
+  res.write("data: [DONE]\n\n");
+  res.end();
+}
+
 // ── Non-streaming relay ─────────────────────────────────────────────────────
 // Buffer the whole reply (failures stay retryable), rewrite guardrail aborts to
 // content_filter completions, re-expand tool-call args.
@@ -1009,7 +1146,7 @@ function applyLengthFinish(obj, cappedAt) {
 }
 
 function relayNonStreamingChat({ res, proxyRes, diag, fail, isAborting, markCommitted,
-                                 parsedReq, promptTokensFallback, reqStart, cappedAt, stopSequences }) {
+                                 parsedReq, promptTokensFallback, reqStart, cappedAt, stopSequences, dispatch, dispatchStreamOut }) {
 // Non-streaming: buffer fully (so we can still retry), then fix usage.
 let raw = "";
 proxyRes.on("data", (c) => (raw += c));
@@ -1043,6 +1180,19 @@ proxyRes.on("end", () => {
   if (obj) {
     // fm serve's non-streaming usage is accurate — pass it through untouched.
     const msg = obj.choices && obj.choices[0] && obj.choices[0].message;
+    // A dispatched request asked fm serve for the tool-selection object. Turn it back
+    // into the `tool_calls` shape the client asked for. A reply we cannot use is
+    // relayed untouched: inventing a call would be worse than surfacing the text.
+    if (dispatch && msg && typeof msg.content === "string") {
+      const call = dispatchToToolCalls(msg.content, dispatch.toolNames);
+      if (call) {
+        msg.tool_calls = call.tool_calls;
+        msg.content = null;
+        obj.choices[0].finish_reason = "tool_calls";
+      } else {
+        diag("DISPATCH UNPARSED (relaying content)", `— ${msg.content.slice(0, 120)}`);
+      }
+    }
     if (STRIP_MARKERS && msg && typeof msg.content === "string") {
       msg.content = stripTemplateMarkers(msg.content);
     }
@@ -1061,6 +1211,13 @@ proxyRes.on("end", () => {
   const nsCompletionTokens = (obj && obj.usage && obj.usage.completion_tokens) || 0;
   logToks((parsedReq && parsedReq.model) || "unknown", "sync", nsCompletionTokens, Date.now() - reqStart);
   markCommitted();
+  // The client asked for SSE on a dispatched request, so the buffered reply becomes a
+  // stream here. Arguments go out in pieces, as OpenAI does, so a client that
+  // concatenates `function.arguments` across deltas gets valid JSON.
+  if (dispatchStreamOut && obj) {
+    emitSynthesisedStream(res, obj, outStatus, proxyRes.headers);
+    return;
+  }
   relayHead(res, outStatus, proxyRes.headers, Buffer.byteLength(out));
   res.end(out);
 });
@@ -1084,7 +1241,7 @@ const server = http.createServer((req, res) => {
     const reqStart = Date.now();
     const ctx = prepareUpstreamRequest(req, body);
     const { fixed, upstreamHeaders, parsedReq, isChat, isStream,
-            clientDeclinedUsage, promptTokensFallback, cappedAt, responseFormatCycle, stopSequences } = ctx;
+            clientDeclinedUsage, promptTokensFallback, cappedAt, responseFormatCycle, stopSequences, dispatch, dispatchStreamOut } = ctx;
 
     // One-line failure diagnostic. Success is not logged.
     const diag = (label, extra = "") =>
@@ -1134,7 +1291,7 @@ const server = http.createServer((req, res) => {
 
           const g = createAttemptGate({ res, proxyRes, proxyReq, plan, attempt, isStream, diag });
           gate = g;
-          const relay = { res, proxyRes, diag, ...g, parsedReq, promptTokensFallback, reqStart, cappedAt, stopSequences };
+          const relay = { res, proxyRes, diag, ...g, parsedReq, promptTokensFallback, reqStart, cappedAt, stopSequences, dispatch, dispatchStreamOut };
           if (isStream) relayStreamingChat({ ...relay, clientDeclinedUsage });
           else relayNonStreamingChat(relay);
         }
