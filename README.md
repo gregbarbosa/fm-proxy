@@ -57,7 +57,7 @@ described below.
 | CORS, `GET /v1/models`, `GET /health` | Works |
 | Typed errors | Works |
 | **Private Cloud Compute (`pcc`)** | **Removed upstream.** |
-| **Tool / function calling** | **Broken upstream. See the warning below.** |
+| **Tool / function calling** | **Forced `tool_choice` works. `auto` is broken upstream.** |
 
 > [!WARNING]
 > **Tool calling is still broken, and it still fails silently.**
@@ -83,9 +83,17 @@ described below.
 > markers are how you detect the upstream bug. With the flag on, 10 of 10 replies came
 > back clean and the tool call inside them was untouched.
 >
-> Do not use tool calling for work that you must trust. The proxy still repairs tool
-> schemas, so tool calling returns without a change here once `fm serve` reads the
-> call again.
+> **A forced `tool_choice` does work.** Set `tool_choice: "required"`, or name a
+> function, and the proxy translates the call into a `response_format` schema. `fm serve`
+> rejects a forced `tool_choice` outright but honours `response_format`, so constrained
+> decoding picks the tool and the proxy hands you real `tool_calls`. Measured on the
+> 27.0 RC: 16 of 16 forced calls succeeded, routing to the right tool out of two, at
+> roughly 115 prompt tokens against 256 for the native path. Streaming works too.
+>
+> Only `tool_choice: "auto"` is still broken, and it is left alone on purpose. Auto has
+> to be able to answer without calling a tool, and giving the model that escape is
+> exactly what stops it selecting one: 0 of 25 in testing. If you can say which tool you
+> want, or that you want one at all, use a forced `tool_choice` and it works today.
 
 > [!NOTE]
 > **A self-referencing `$defs` schema stops `fm serve`. The proxy blocks it for you.**
@@ -205,7 +213,7 @@ Each item below is a live-verified `fm serve` behaviour that breaks OpenAI clien
 | A `$defs`/`$ref` schema returns 400 unless every definition carries Apple's dialect. | Resolves the references inline and removes `$defs`. |
 | A tool whose `function.description` is absent returns 400 for the whole request. | Fills in an empty description. |
 | Streaming usage arrives only when the request sets `stream_options.include_usage`. | Sets the flag upstream and relays the real numbers. |
-| A forced `tool_choice` fails permanently on `system`, with a message that reads like a rate limit. | Types it as terminal, so it fails in ~150 ms instead of retrying. |
+| A forced `tool_choice` returns `500 unsupported generation guide`. | Translates it into a `response_format` schema, so constrained decoding makes the call. |
 | A tool parameter that uses `$ref` loses its structure. | Resolves the references before simplifying. |
 | A self-referencing `$defs` schema hangs the server permanently. | Rejects it with `400` `cyclic_schema` before opening an upstream connection. |
 | A request that carries `Origin` or `Referer` is refused as cross-site. | Strips that header family on the upstream hop, so browser clients work. |
