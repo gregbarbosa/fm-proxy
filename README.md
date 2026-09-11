@@ -60,10 +60,11 @@ described below.
 | **Tool / function calling** | **Forced `tool_choice` works. `auto` is broken upstream.** |
 
 > [!WARNING]
-> **Tool calling is still broken, and it still fails silently.**
+> **`tool_choice: "auto"` is still broken, and it still fails silently.**
 >
 > `fm serve` does not convert the model's tool call into a `tool_calls` field. The
-> field stays absent and `finish_reason` is `stop`.
+> field stays absent and `finish_reason` is `stop`. A forced `tool_choice` does work;
+> see below.
 >
 > The model picks the correct tool and the correct arguments, and writes them into
 > `content`, for example `{"tool_call": [{"name": "get_weather", "arguments":

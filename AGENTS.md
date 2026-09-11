@@ -73,7 +73,11 @@ Audit recipe after any OS update:
    - tool calling — still broken upstream (`tool_calls` never populated)
    - `$defs` in `response_format` — undecorated 400s; a **cyclic** one hangs `fm serve`
      permanently, so test it last and restart the server afterwards
-   - forced `tool_choice` — 500 "unsupported generation guide"
+   - forced `tool_choice` — raw `fm serve` still answers 500 "unsupported generation
+     guide". Through the proxy it must return a real `tool_call`: forced dispatch now
+     depends on `response_format` and constrained decoding continuing to work, so if
+     Apple breaks those, forced tool calling breaks silently.
+     `node tools/deviation-probe.js 1977` check 6 covers this.
    - a tool with no `function.description` — 400s the whole request
    - omitted `stream` — returns SSE, not JSON
    - `n > 1` — 400s
@@ -96,9 +100,10 @@ can appear and then clear itself. `fm available` does not detect that state.
 
 ## Running Pi against fm-proxy
 
-Pi works against the on-device model for chat. It cannot use tools, because `fm serve`
-never populates `tool_calls`. What stops it in practice is project context, not the
-harness.
+Pi works against the on-device model for chat. It cannot use tools, because it sends
+`tool_choice: "auto"`, and auto is the mode that stays broken. A client that can force a
+tool does get real `tool_calls`; see "Forced tool calling works, through a schema". What
+stops Pi in practice is project context, not the harness.
 
 Use `pi-minimal`, an alias for `pi -ne -ns -np --no-themes`, and select the `FM`
 provider's `system` model. In a directory with no context file it assembles to about
