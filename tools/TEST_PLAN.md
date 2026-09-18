@@ -10,7 +10,7 @@ Three layers. Run them in order. Each catches what the layer above cannot.
 
 ## Layer 1 — unit and integration
 
-`node --test fm-proxy.test.js`. Expect **108 pass, 0 fail**.
+`node --test fm-proxy.test.js`. Expect **144 pass, 0 fail**.
 
 A skipped test means the `fm` CLI is unavailable. Check the licence with `fm license
 --status`, which prints without prompting. Run `sudo fm license` only if it reports no

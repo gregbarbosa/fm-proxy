@@ -8,13 +8,15 @@
 
 **`fm-proxy.js`** sits in front of Apple's `fm serve` and speaks the OpenAI Chat
 Completions dialect, so an ordinary OpenAI client works against the on-device model
-without code changes. It supports **Beta 7 and later, including the 27.0 RC**; code for
+without code changes. It supports **Beta 7 and later, including the 27.0 RC and the
+27.2 beta**; code for
 earlier betas is removed.
 
 An earlier in-process Swift `fms` app was explored and dropped: it could not run
 inference on Private Cloud Compute, which needed the Apple-private entitlement
-`com.apple.modelmanager.inference`. That question is now moot — Beta 7 removes PCC from
-the `fm` binary altogether.
+`com.apple.modelmanager.inference`. That question went moot when Beta 7 removed PCC from
+the `fm` binary altogether — and stayed unanswered when the 27.2 beta brought PCC back
+as a CLI model, gated to Terminal.app contexts. The in-process Swift app stayed dropped.
 
 ## `fm` CLI reference
 
@@ -45,13 +47,13 @@ and `tools/ask-image.sh` is a manual probe.
 `fm --version` does **not** exist (errors "Unknown option"). To detect when Apple ships a
 new `fm`/FoundationModels build across macOS betas, fingerprint the binary:
 
-| What | How | Beta 2 value | Beta 3 value | Beta 4 value | Beta 5 value | Beta 6 value | Beta 7 value | Beta 8 value | 27.0 RC |
-|---|---|---|---|---|---|---|---|---|---|
-| fm source version | `otool -l /usr/bin/fm \| grep -A2 LC_SOURCE_VERSION` | `2.0.55.1.402` | `2.0.59` | `2.0.62.1.402` | `2.0.68.1.401` | `2.0.68.1.401` | `2.0.68.1.402` | `2.0.68.1.402` | `2.0.68.1.402` |
-| Framework version | `plutil -p /System/Library/Frameworks/FoundationModels.framework/Resources/Info.plist \| grep CFBundleVersion` | `2.0.55.1.402` | `2.0.59` | `2.0.62.1.402` | `2.0.68.1.401` | `2.0.68.1.401` | `2.0.68.1.402` | `2.0.68.1.402` | `2.0.68.1.402` |
-| Runtime version | `codesign -dvvv /usr/bin/fm` → `Runtime Version=` | `27.0.0` | `27.0.0` | `27.0.0` | `27.0.0` | `27.0.0` | `27.0.0` | `27.0.0` | `27.0.0` |
-| Rebuild date | `ls -la /usr/bin/fm` (mtime) | Jun 19 2026 | Jul 3 2026 | Jul 17 2026 | Aug 7 2026 | Aug 14 2026 | Aug 21 2026 | Aug 27 2026 | Sep 3 2026 |
-| macOS build | `sw_vers` → `BuildVersion` | `26A5368g` (27.0 Beta 2) | `26A5378j` (27.0 Beta 3) | `26A5388g` (27.0 Beta 4) | `26A5406e` (27.0 Beta 5) | `26A5416b` (27.0 Beta 6) | `26A5421a` (27.0 Beta 7) | `26A5425a` (27.0 Beta 8) | `26A428` (27.0 RC) |
+| What | How | Beta 2 value | Beta 3 value | Beta 4 value | Beta 5 value | Beta 6 value | Beta 7 value | Beta 8 value | 27.0 RC | 27.2 Beta |
+|---|---|---|---|---|---|---|---|---|---|---|
+| fm source version | `otool -l /usr/bin/fm \| grep -A2 LC_SOURCE_VERSION` | `2.0.55.1.402` | `2.0.59` | `2.0.62.1.402` | `2.0.68.1.401` | `2.0.68.1.401` | `2.0.68.1.402` | `2.0.68.1.402` | `2.0.68.1.402` | `2.1.7.1.901` |
+| Framework version | `plutil -p /System/Library/Frameworks/FoundationModels.framework/Resources/Info.plist \| grep CFBundleVersion` | `2.0.55.1.402` | `2.0.59` | `2.0.62.1.402` | `2.0.68.1.401` | `2.0.68.1.401` | `2.0.68.1.402` | `2.0.68.1.402` | `2.0.68.1.402` | `2.1.7.1.901` |
+| Runtime version | `codesign -dvvv /usr/bin/fm` → `Runtime Version=` | `27.0.0` | `27.0.0` | `27.0.0` | `27.0.0` | `27.0.0` | `27.0.0` | `27.0.0` | `27.0.0` | `27.2.0` |
+| Rebuild date | `ls -la /usr/bin/fm` (mtime) | Jun 19 2026 | Jul 3 2026 | Jul 17 2026 | Aug 7 2026 | Aug 14 2026 | Aug 21 2026 | Aug 27 2026 | Sep 3 2026 | Sep 13 2026 |
+| macOS build | `sw_vers` → `BuildVersion` | `26A5368g` (27.0 Beta 2) | `26A5378j` (27.0 Beta 3) | `26A5388g` (27.0 Beta 4) | `26A5406e` (27.0 Beta 5) | `26A5416b` (27.0 Beta 6) | `26A5421a` (27.0 Beta 7) | `26A5425a` (27.0 Beta 8) | `26A428` (27.0 RC) | `26B5086k` (27.2 Beta) |
 
 Audit recipe after any OS update:
 
@@ -137,7 +139,9 @@ The proxy is a drop-in OpenAI endpoint — point any OpenAI client at it and go:
 - **API key:** any non-empty dummy string (e.g. `sk-local`). It's loopback-only; the
   key is ignored, not validated, but most SDKs refuse to start without *some* key set.
 - **Endpoints:** `POST /v1/chat/completions` (translated), `GET /v1/models` and
-  `GET /health` (passed straight through to `fm serve`). `system` is the only model.
+  `GET /health` (passed straight through to `fm serve`). `system` is the default model;
+  the 27.2 beta also accepts `pcc` (Terminal.app-gated, see below), and the proxy
+  forwards `model` through untouched, so a `pcc` request reaches fm serve as-is.
 - **Streaming** (`stream: true`) and **non-streaming** both work; usage is repaired
   either way (see "Token usage repair").
 - **Tools:** standard OpenAI `tools` / `tool_calls`. Rich/nested schemas are accepted —
@@ -189,36 +193,42 @@ The proxy is a drop-in OpenAI endpoint — point any OpenAI client at it and go:
   - `type: "server_error"` (`code: "internal_error"` / `"upstream_unreachable"`) —
     anything else, including the `502` when `fm serve` is down.
 
-### Upstream behaviour on the 27.0 RC
+### Upstream behaviour on the 27.2 beta
 
-Audited 2026-09-09 against a live `fm serve` on `system`, build `26A428`, `fm`
-2.0.68.1.402. Treat the RC as the final build. This table is the single statement of
-what `fm serve` does; do not re-derive it from the release history below.
+Audited 2026-09-18 against a live `fm serve` on `system`, build `26B5086k`, `fm`
+2.1.7.1.901. This table is the single statement of what `fm serve` does; do not
+re-derive it from the release history below.
 
 | Behaviour | What `fm serve` does |
 |---|---|
 | Tool calling | Never populates `tool_calls`. `finish_reason` is `stop`. |
 | Tool-call content | Leaks raw chat-template markers. See below. |
-| Forced `tool_choice` | `500 An unsupported generation guide was used.` The proxy routes around it. |
+| Forced `tool_choice` | `500 An unsupported generation guide was used.` on a non-streaming request. On an SSE request the failure arrives as an `event: error` frame under HTTP 200 instead. The proxy routes around it either way. |
 | Tool with no `function.description` | `400` for the whole request |
 | `stream` omitted | Returns `text/event-stream`, not one JSON object |
 | `n > 1` | `400 n=2 is not supported.` |
 | `parallel_tool_calls` | Accepted, then ignored |
 | `max_tokens` | Ignored. The proxy truncates. |
 | Prompt framing | `hello world` is 57 `prompt_tokens` |
-| Context window | 4096 tokens. 4045 passes, ~4255 overflows. |
+| Context window | 4096 tokens. 4075 passes, ~4099 overflows. |
 | `$defs` + dialect, non-cyclic | `200` in one to three seconds |
 | `$defs` + dialect, **cyclic** | Hangs permanently. Restart `fm serve`. |
 | `$defs`, no dialect | `400` naming `x-order` |
 | Titled string schema | `400` unless it carries a non-empty `enum` |
 | `array<array<object>>` tool param | Accepted natively |
 | Vision | Real image understanding. A 256 px PNG costs 131 `prompt_tokens`. |
-| Private Cloud Compute | Removed from the binary in Beta 7. `system` is the only model. |
-| Cross-site headers | `403` if the request carries `Origin`, `Referer`, or `Sec-Fetch-*` |
+| Private Cloud Compute | Back as a second model. `GET /v1/models` lists `system,pcc`, and a `pcc` request is accepted — but only when `fm serve` itself runs from a Terminal.app context. Otherwise it 503s fast: `Model 'pcc' is unavailable: Private Cloud Compute is not available in this context. Please use the Terminal app.` While the OS is still provisioning, Terminal.app gets `systemNotReady` instead. |
+| Unknown model name | `400 Unknown model 'gpt-4o'. Available models: system, pcc. Start fm serve with --model-provider to reach other models.` |
+| Cross-site headers | `403 Cross-site requests are not allowed.` if the request carries `Origin`, `Referer`, or `Sec-Fetch-*` |
 
-The licence is `FM1 version 1.0`, unchanged since Beta 5. Read it with `fm license
---show` and check it with `fm license --status`; both print without prompting, once a
-privileged user has accepted it. Acceptance survives an OS update.
+The licence is `FM1 version 1.1`, agreed 2026-09-18 on this build — the first bump
+since the Beta 5 gate. The operative clause survives unchanged: agreeing means
+"NOT PROGRAMMATICALLY ACCESS OR USE APPLE MODELS THROUGH APPLE SOFTWARE OR SERVICES
+EXCEPT AS EXPRESSLY PERMITTED", which is exactly what `fm-proxy` does. Keep it to
+local research. Read it with `fm license --show` and check it with `fm license
+--status`; both print without prompting, once a privileged user has accepted it.
+Acceptance survives an OS update, but a version bump makes the user re-accept — expect
+one `sudo fm license` after each such update.
 
 #### Tool-call replies leak chat-template markers
 
@@ -245,6 +255,14 @@ signal an audit uses to detect the upstream bug.
 Verified live on the RC. With the flag off, 8 of 10 replies leaked. With it on, 0 of 10
 leaked over the non-streaming path and 0 markers appeared across 4 streaming runs, while
 the rate at which replies carried a real tool call did not change.
+
+Re-verified live on the 27.2 beta, 2026-09-18: the leak persists. 2 of 10 direct replies
+leaked from one prompt and one tool — a small sample, but the audit rule stands: send at
+least 10 requests before you call a build clean. The rendering varies with the sample:
+this run surfaced `[ToolCall{FunctionName:get_weather,Arguments:{city:<ctrl46>Paris<ctrl46>}}]`
+alongside the familiar `<start_of_turn>` shapes. Underneath the markers the call is still
+correct. `tool_calls` was populated 0 of 10 times, all `finish_reason: stop`. With
+`FM_STRIP_TEMPLATE_MARKERS=1`, 0 of 10 leaked through the proxy.
 
 The markers are single tokens in the vocabulary, so each arrives whole in one delta and
 never straddles a chunk boundary. That is why a per-delta regex is enough and no
@@ -282,13 +300,30 @@ and cannot name a tool until it has arrived whole, so the proxy asks `fm serve` 
 non-streaming reply and synthesises the SSE frames. Arguments go out in 64-character
 pieces, so a client that concatenates `function.arguments` across deltas gets valid JSON.
 
+Re-measured on the 27.2 beta, 2026-09-18: `node tools/deviation-probe.js 1977` reports
+11 of 11 handled, and check 6 — a forced named function — returned a real `tool_call`
+with valid JSON arguments. The dispatch translation survived the `fm` jump to 2.1.7.1.901
+intact.
+
 Caution: a forced tool call and a caller's own `response_format` cannot both hold. The
 dispatch schema wins.
 
 #### Operational notes
 
-- **`fm available` is not a health check.** It reports "System model available" even
-  while every inference request fails. Test health with a real request.
+- **`fm models` (renamed from `fm available` in the 27.2 beta) is not a health check.**
+  It reports the system model as available even while every inference request fails.
+  Test health with a real request.
+- **The `pcc` gate is contextual, not just versional.** `fm` refuses PCC outside
+  Terminal.app ("not available in this context") — an agent shell under herdr or pi gets
+  refused while the same command in Terminal.app proceeds. `fm serve` inherits the
+  context it was launched from, so a proxy in front of a herdr-launched `fm serve`
+  cannot reach `pcc` either. Launch the stack from Terminal.app if you want to test it.
+- **PCC `systemNotReady` is environmental.** After the 27.2 beta update, `fm models`
+  reports `✗ pcc (systemNotReady)` and `fm respond -m pcc` says "The system is not
+  ready. Try again later.", from Terminal.app itself. It is the same settling state as
+  the error 15 note below: wait, re-check periodically, do not debug code against it.
+  Six attempts over two minutes on audit day did not clear it; `system` was healthy
+  throughout, so treat the two models' readiness as independent.
 - **`com.apple.SensitiveContentAnalysisML error 15` is environmental.** It appears on a
   machine still settling after an OS update, and it clears itself: on the RC it cleared
   in about 20 to 30 minutes with no intervention. An experiment ruled out both the cyclic
@@ -297,12 +332,13 @@ dispatch schema wins.
 
 #### Expected test results
 
-108 unit tests pass. The wire baseline records 14 cases and 3 endpoints.
+144 unit tests pass (the forced-dispatch merge grew the suite from the 108 recorded at
+the RC audit). The wire baseline records 22 cases and 3 endpoints.
 `node tools/deviation-probe.js 1977` reports 11 of 11 handled. `tools/harness-check.sh`
 reports 6 passed and 1 failed; the failure is the `pi` case described in
 `tools/TEST_PLAN.md`.
 
-A test skips when `fm` cannot answer, so a run during a model-service fault reports 106
+A test skips when `fm` cannot answer, so a run during a model-service fault reports 142
 passed and 2 skipped. That is the machine, not the code.
 
 Caution: pin `FM_BIN` to a path that does not exist for **both** runs when you compare
@@ -331,10 +367,12 @@ authoritative for what is true now.
 | Beta 7 `26A5421a` | 2.0.68.1.402 | **PCC removed from the binary**, with `fm quota-usage`. Non-cyclic `$defs` fixed. `array<array<object>>` accepted. Titled strings began requiring an `enum`. Audit fixed two proxy hazards in `57f26d3`: a forwarded cyclic schema, and a retried terminal 400. |
 | Beta 8 `26A5425a` | 2.0.68.1.402 | Rebuilt binary, identical CLI surface. No behaviour change. Audit fixed a proxy bug: a capped stream emitted two `finish_reason` values. |
 | RC `26A428` | 2.0.68.1.402 | Rebuilt binary, identical CLI surface. The RC audit found the tool-call marker leak. A clean-room record shows Beta 7 leaked too. |
+| 27.2 Beta `26B5086k` | 2.1.7.1.901 | **PCC model returned**, gated to Terminal.app contexts and `systemNotReady` while provisioning, with `fm quota-usage` restored and `fm available` renamed `fm models`. New `--model-provider` / `--model-provider-header` routing with a `fm config` tree; `fm serve` routes non-built-in models upstream. Licence bumped to `FM1 version 1.1`, same operative clause. Audit: every known wall holds (tool calling, cyclic hang, framing 57, window 4096, 400s); marker leak persists; forced dispatch still works. |
 
-Three builds now share `fm` 2.0.68.1.402 and produce a byte-identical help tree, so only
-the binary's mtime distinguishes them. The help tree does not show behaviour. Audit both layers
-after any OS update.
+Beta 7, Beta 8 and the RC shared `fm` 2.0.68.1.402 and a byte-identical help tree, so
+only the binary's mtime distinguished them. The 27.2 beta broke that streak with a
+version jump and a grown CLI surface. Either way the help tree does not show behaviour.
+Audit both layers after any OS update.
 
 ### Vision: how the on-device model encodes images
 

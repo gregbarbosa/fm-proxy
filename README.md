@@ -14,8 +14,9 @@ of it and corrects those departures.
 > macOS 27.0 Beta 5 added a legal notice. You must accept it before `fm` runs at all.
 > Run `sudo fm license` to read it and accept it. After that, `fm license --show`
 > prints the text again without prompting, and `fm license --status` reports the
-> version you agreed to. The 27.0 RC still carries the same text, recorded as
-> `FM1 version 1.0`. It says:
+> version you agreed to. The 27.2 beta carries the same clause, recorded as
+> `FM1 version 1.1` — the first version bump since Beta 5. The clause itself did not
+> change. It says:
 >
 > > YOU ARE ALSO AGREEING TO NOT PROGRAMMATICALLY ACCESS OR USE APPLE MODELS THROUGH
 > > APPLE SOFTWARE OR SERVICES EXCEPT AS EXPRESSLY PERMITTED.
@@ -31,22 +32,24 @@ of it and corrects those departures.
 
 [fmf]: https://developer.apple.com/documentation/foundationmodels
 
-## State on the 27.0 RC
+## State on the 27.2 beta
 
-Tested on macOS 27.0 RC (`26A428`), which ships `fm` 2.0.68.1.402. Beta 7 and Beta 8
-ship the same `fm` build and behave the same way, apart from the tool-call content
-described below.
+Tested on macOS 27.2 Beta (`26B5086k`), which ships `fm` 2.1.7.1.901 — a version jump
+from the 2.0.68 line, with a grown CLI surface: PCC returns, `fm available` is renamed
+`fm models`, `fm quota-usage` is restored, and a new `--model-provider` option routes
+non-built-in models to an external Chat Completions server (managed via a new `fm config`
+tree). Every behaviour the proxy depends on survived the jump.
 
 > [!IMPORTANT]
-> **Beta 7 removed the `pcc` model, and the RC does not bring it back. Private Cloud
-> Compute is gone from `fm`.**
+> **The 27.2 beta brings `pcc` back — gated and, for now, not ready.**
 >
-> `fm` accepts only `system` now. `fm respond -m pcc` answers `Please provide one of
-> 'system'`. The `fm quota-usage` subcommand is deleted. `fm serve` answers a request
-> for `pcc` with `400 Unknown model 'pcc'. Available models: system`.
->
-> This is a change in the binary, not a licence or account state. Every PCC feature
-> that earlier notes describe is unreachable.
+> `GET /v1/models` lists `system,pcc`, and `fm serve` accepts `model:"pcc"`. But PCC
+> only runs from a Terminal.app context: anywhere else `fm` answers "Private Cloud
+> Compute is not available in this context. Please use the Terminal app." — and `fm serve`
+> inherits the context it was launched from, so a herdr- or pi-launched stack cannot
+> reach `pcc` at all. From Terminal.app, this machine still reports `systemNotReady`
+> while the OS finishes provisioning. Treat that as the usual post-update settling, not
+> a bug: `system` stays healthy throughout.
 
 | Feature | State |
 |---|---|
@@ -56,7 +59,7 @@ described below.
 | Images | Works |
 | CORS, `GET /v1/models`, `GET /health` | Works |
 | Typed errors | Works |
-| **Private Cloud Compute (`pcc`)** | **Removed upstream.** |
+| **Private Cloud Compute (`pcc`)** | **Back upstream, Terminal.app contexts only, `systemNotReady` while provisioning. The proxy forwards `model:"pcc"` untouched.** |
 | **Tool / function calling** | **Forced `tool_choice` works. `auto` is broken upstream.** |
 
 > [!WARNING]
@@ -72,7 +75,10 @@ described below.
 >
 > The content is not clean. Most replies to a request that carries `tools` also contain
 > raw chat-template markers such as `<start_of_turn>` and `<ctrl46>`. The counts on the
-> 27.0 RC are 7 of 10 direct replies and 8 to 9 of 10 through the proxy. The leak is not
+> 27.0 RC are 7 of 10 direct replies and 8 to 9 of 10 through the proxy. On the 27.2
+> beta the leak persists: 2 of 10 direct replies, including a new
+> `[ToolCall{FunctionName:get_weather,Arguments:{city:<ctrl46>Paris<ctrl46>}}]`
+> rendering. The leak is not
 > new on the RC. A clean-room record dated 2026-08-18 shows the same markers on Beta 7.
 > Earlier tests missed it.
 >
@@ -89,7 +95,9 @@ described below.
 > rejects a forced `tool_choice` outright but honours `response_format`, so constrained
 > decoding picks the tool and the proxy hands you real `tool_calls`. Measured on the
 > 27.0 RC: 16 of 16 forced calls succeeded, routing to the right tool out of two, at
-> roughly 115 prompt tokens against 256 for the native path. Streaming works too.
+> roughly 115 prompt tokens against 256 for the native path. Streaming works too, and
+> the 27.2 beta re-verified it: the deviation probe reports 11 of 11, with the forced
+> named-function check returning a real `tool_call` with valid JSON arguments.
 >
 > Only `tool_choice: "auto"` is still broken, and it is left alone on purpose. Auto has
 > to be able to answer without calling a tool, and giving the model that escape is
@@ -105,8 +113,9 @@ described below.
 > `cyclic_schema` naming the definition, before it opens an upstream connection. Send a
 > recursive schema to `fm serve` directly and you still lose it.
 >
-> A restart of `fm serve` clears it, on the 27.0 RC as on every earlier build. Expect the
-> first request after the restart to take about 25 seconds while the model reloads.
+> A restart of `fm serve` clears it, on the 27.0 RC and 27.2 beta as on every earlier
+> build. Expect the first request after the restart to take about 25 seconds while the
+> model reloads.
 
 `fm serve` rejects `n > 1` with `400 n=3 is not supported. Only a single completion per
 request is implemented.` The proxy types that as `invalid_request_error` and does not
@@ -115,8 +124,8 @@ proxy, because `fm serve` rejects it. Other sampling parameters pass through unc
 
 ## Requirements
 
-- macOS 27.0 Beta 7 or later, which includes `fm` 2.0.68.1.402. Tested on the 27.0 RC
-  (`26A428`). Earlier betas are not supported.
+- macOS 27.0 Beta 7 or later. Tested on the 27.0 RC (`26A428`) and the 27.2 beta
+  (`26B5086k`). Earlier betas are not supported.
 - An Apple Account, signed in, with Apple Intelligence enabled. The `system` model runs
   locally.
 - Node.js 18 or later. The proxy uses only the standard library.
@@ -134,9 +143,10 @@ Wait for `stack up — OpenAI base URL: http://127.0.0.1:1977/v1`.
 The launcher runs `fm serve` in the foreground and the proxy as a background child.
 Press Ctrl-C to stop both. Do not press Ctrl-Z: a suspended `fm serve` keeps the port.
 
-Beta 7 removed the `pcc` model, so the Terminal.app foreground rule that Private Cloud
-Compute needed no longer applies. The `system` model works in any terminal, and in a
-background process.
+Beta 7 removed the `pcc` model, so the old Terminal.app foreground rule stopped mattering
+for `system` — it works in any terminal, and in a background process. The 27.2 beta
+brings `pcc` back, and the rule matters again for that one model: `fm serve` must be
+launched from Terminal.app for `pcc` requests to get past the context gate.
 
 To run the two processes yourself, in two windows:
 
@@ -149,7 +159,9 @@ node fm-proxy.js                # the proxy, :1977 -> :1976
 
 - Base URL: `http://127.0.0.1:1977/v1`
 - API key: any value. The proxy requires one and ignores it.
-- Models: `system` (on-device). It is the only model `fm` accepts.
+- Models: `system` (on-device). The 27.2 beta also lists `pcc`, gated to Terminal.app
+  contexts and `systemNotReady` while provisioning; the proxy forwards `model` through
+  untouched.
 
 ```python
 from openai import OpenAI
@@ -195,7 +207,8 @@ FM_STRIP_TEMPLATE_MARKERS=1 ./fm-launch.sh
 ```
 
 Measured on the 27.0 RC: 8 of 10 replies leaked with the flag off, and 0 of 10 with it
-on, while the rate at which replies carried a real tool call did not change.
+on, while the rate at which replies carried a real tool call did not change. Re-verified
+on the 27.2 beta: 0 of 10 leaked with the flag on.
 
 It is off by default for two reasons. The proxy otherwise corrects only envelopes and
 schemas and never edits the model's words, and the markers are the signal that shows the
