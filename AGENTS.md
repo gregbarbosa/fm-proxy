@@ -42,6 +42,18 @@ of truth is the installed binary.
 Some tools are local-only and are not in the repo: `tools/harness-check.sh` drives `pi`,
 and `tools/ask-image.sh` is a manual probe.
 
+**Help-text vs dump.** The reference is generated from `--experimental-dump-help`, which
+is a superset of human `--help`: 14 long options are hidden from the help text but real
+and working (verified live per command). Notably `fm chat` hides `--model-provider`,
+`--model-provider-header`, `--guardrails`, and `--use-case` — chat sessions do reach
+custom providers. `respond` also hides the `--stream`/`--no-stream` toggle and
+`--show-assets`; `count-tokens` hides `--label`, `--schema`, `--verbose`; `models` hides
+`--guardrails`, `--model`, `--use-case`; `config add model-provider` hides its header
+flag. Conversely, `fm schema object`'s type-builder flags (`--string`, `--nested`,
+`--anyOf`, …) live in the command's discussion text, not the parsed arguments — the
+reference carries them in the discussion block. Root help's MODELS section lists
+`system`, `pcc`, and `<model>` — those are model names, not commands.
+
 ### Fingerprinting the `fm` version (no `--version` flag)
 
 `fm --version` does **not** exist (errors "Unknown option"). To detect when Apple ships a
