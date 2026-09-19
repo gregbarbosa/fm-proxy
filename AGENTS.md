@@ -74,6 +74,12 @@ prints the exact asset bundles behind each inference — on `26B5086k` that is
 `…instruct_3b.fm_api_generic_14.1000.0.13.103386,0`. The on-device model is `instruct_3b`.
 Asset IDs are finer-grained than the `fm` source version — they move when Apple swaps
 weights without rebuilding the CLI. Check them alongside the binary in future audits.
+The weights themselves are root-proof: all four `UAF_FM_*` AssetsV2 domains
+(GenerativeModels, CodeLM, Visual, Overrides) return EPERM even to `sudo ls` — MAC on a
+restricted system path, not TCC (Full Disk Access does not help; non-FM AssetsV2 domains
+read fine). This is a hardening change vs the macOS 15.1 era, when that path was
+publicly readable. Dir mtimes (Sep 18 17:51) stamp the install event; `--show-assets`
+is the only sanctioned inventory window.
 
 Audit recipe after any OS update:
 
