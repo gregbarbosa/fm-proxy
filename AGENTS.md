@@ -217,7 +217,7 @@ re-derive it from the release history below.
 | Titled string schema | `400` unless it carries a non-empty `enum` |
 | `array<array<object>>` tool param | Accepted natively |
 | Vision | Real image understanding. A 256 px PNG costs 131 `prompt_tokens`. |
-| Private Cloud Compute | Back as a second model. `GET /v1/models` lists `system,pcc`, and a `pcc` request is accepted — but only when `fm serve` itself runs from a Terminal.app context. Otherwise it 503s fast: `Model 'pcc' is unavailable: Private Cloud Compute is not available in this context. Please use the Terminal app.` While the OS is still provisioning, Terminal.app gets `systemNotReady` instead. |
+| Private Cloud Compute | Back as a second model. `GET /v1/models` lists `system,pcc`, and a `pcc` request is accepted — but only when `fm serve` itself runs from a Terminal.app context. Otherwise it 503s fast: `Model 'pcc' is unavailable: Private Cloud Compute is not available in this context. Please use the Terminal app.` From Terminal.app this seed still fails deterministically: modelmanagerd cannot read fm's `com.apple.modelmanager.inference` entitlement at runtime (`SecTaskCopyValueForEntitlement failed`), refuses the session, and fm prints `The system is not ready.` See the operational note. |
 | Unknown model name | `400 Unknown model 'gpt-4o'. Available models: system, pcc. Start fm serve with --model-provider to reach other models.` |
 | Cross-site headers | `403 Cross-site requests are not allowed.` if the request carries `Origin`, `Referer`, or `Sec-Fetch-*` |
 
@@ -318,12 +318,21 @@ dispatch schema wins.
   refused while the same command in Terminal.app proceeds. `fm serve` inherits the
   context it was launched from, so a proxy in front of a herdr-launched `fm serve`
   cannot reach `pcc` either. Launch the stack from Terminal.app if you want to test it.
-- **PCC `systemNotReady` is environmental.** After the 27.2 beta update, `fm models`
-  reports `✗ pcc (systemNotReady)` and `fm respond -m pcc` says "The system is not
-  ready. Try again later.", from Terminal.app itself. It is the same settling state as
-  the error 15 note below: wait, re-check periodically, do not debug code against it.
-  Six attempts over two minutes on audit day did not clear it; `system` was healthy
-  throughout, so treat the two models' readiness as independent.
+- **PCC `systemNotReady` on the 27.2 beta is a broken entitlement check, not settling.**
+  First read as the usual post-update settling, falsified by a log capture two hours
+  later (`log stream --level debug --predicate 'subsystem == "com.apple.fm"'`, attempt
+  from Terminal.app). The attempt clears the context gate and iCloud check (`User is
+  signed into iCloud`), modelmanagerd resolves fm's use case
+  (`Apple.Group1.AutomationTools.Zap.FMCLI`) off its distribution signature and finds
+  the server asset bundle (`com.apple.fm.language.instruct_server_v2.fm_api`) — then
+  fails: `CS_VALIDATION_CATEGORY_INVALID` for fm's pid, `SecTaskCopyValueForEntitlement
+  failed ... with error`, concluded as `Client missing entitlement
+  com.apple.modelmanager.inference`, session refused. The binary **is** entitled —
+  `codesign -d --entitlements :- /usr/bin/fm` shows `com.apple.modelmanager.inference`
+  `true` — so the daemon's runtime read of a valid Apple signature is what broke. The
+  local model is unaffected: its bundle policy does not run this check. Deterministic,
+  so waiting does nothing. Try a reboot (rebuilds trust caches); if it survives that,
+  it is a seed bug to file, not to debug around.
 - **`com.apple.SensitiveContentAnalysisML error 15` is environmental.** It appears on a
   machine still settling after an OS update, and it clears itself: on the RC it cleared
   in about 20 to 30 minutes with no intervention. An experiment ruled out both the cyclic
@@ -367,7 +376,7 @@ authoritative for what is true now.
 | Beta 7 `26A5421a` | 2.0.68.1.402 | **PCC removed from the binary**, with `fm quota-usage`. Non-cyclic `$defs` fixed. `array<array<object>>` accepted. Titled strings began requiring an `enum`. Audit fixed two proxy hazards in `57f26d3`: a forwarded cyclic schema, and a retried terminal 400. |
 | Beta 8 `26A5425a` | 2.0.68.1.402 | Rebuilt binary, identical CLI surface. No behaviour change. Audit fixed a proxy bug: a capped stream emitted two `finish_reason` values. |
 | RC `26A428` | 2.0.68.1.402 | Rebuilt binary, identical CLI surface. The RC audit found the tool-call marker leak. A clean-room record shows Beta 7 leaked too. |
-| 27.2 Beta `26B5086k` | 2.1.7.1.901 | **PCC model returned**, gated to Terminal.app contexts and `systemNotReady` while provisioning, with `fm quota-usage` restored and `fm available` renamed `fm models`. New `--model-provider` / `--model-provider-header` routing with a `fm config` tree; `fm serve` routes non-built-in models upstream. Licence bumped to `FM1 version 1.1`, same operative clause. Audit: every known wall holds (tool calling, cyclic hang, framing 57, window 4096, 400s); marker leak persists; forced dispatch still works. |
+| 27.2 Beta `26B5086k` | 2.1.7.1.901 | **PCC model returned**, gated to Terminal.app contexts, with `fm quota-usage` restored and `fm available` renamed `fm models`. New `--model-provider` / `--model-provider-header` routing with a `fm config` tree; `fm serve` routes non-built-in models upstream. Licence bumped to `FM1 version 1.1`, same operative clause. Audit: every known wall holds (tool calling, cyclic hang, framing 57, window 4096, 400s); marker leak persists; forced dispatch still works. PCC fails in this seed: modelmanagerd cannot read fm's inference entitlement at runtime, so `systemNotReady` is deterministic, not settling. |
 
 Beta 7, Beta 8 and the RC shared `fm` 2.0.68.1.402 and a byte-identical help tree, so
 only the binary's mtime distinguished them. The 27.2 beta broke that streak with a

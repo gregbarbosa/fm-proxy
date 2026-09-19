@@ -47,9 +47,11 @@ tree). Every behaviour the proxy depends on survived the jump.
 > only runs from a Terminal.app context: anywhere else `fm` answers "Private Cloud
 > Compute is not available in this context. Please use the Terminal app." — and `fm serve`
 > inherits the context it was launched from, so a herdr- or pi-launched stack cannot
-> reach `pcc` at all. From Terminal.app, this machine still reports `systemNotReady`
-> while the OS finishes provisioning. Treat that as the usual post-update settling, not
-> a bug: `system` stays healthy throughout.
+> reach `pcc` at all. From Terminal.app it still fails — see the audit note: this seed
+> has a broken entitlement check (`modelmanagerd` cannot read fm's own
+> `com.apple.modelmanager.inference` entitlement at runtime), so every PCC session is
+> refused and `fm` prints "The system is not ready." A reboot is worth one try; past
+> that it is a seed bug, not settling: `system` stays healthy throughout.
 
 | Feature | State |
 |---|---|
