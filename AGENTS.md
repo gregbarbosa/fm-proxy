@@ -40,7 +40,9 @@ Regenerate it after any `fm` update and commit the result. Never hand-edit it: t
 of truth is the installed binary.
 
 Some tools are local-only and are not in the repo: `tools/harness-check.sh` drives `pi`,
-and `tools/ask-image.sh` is a manual probe.
+and `tools/ask-image.sh` is a manual probe. Deeper internals and the external resource
+list (model catalog, vocab, asset protection, PCC bug trail, provider integrations) live
+in `docs/fm-internals-and-resources.md`.
 
 **Help-text vs dump.** The reference is generated from `--experimental-dump-help`, which
 is a superset of human `--help`: 14 long options are hidden from the help text but real
