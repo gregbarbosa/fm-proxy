@@ -67,6 +67,14 @@ new `fm`/FoundationModels build across macOS betas, fingerprint the binary:
 | Rebuild date | `ls -la /usr/bin/fm` (mtime) | Jun 19 2026 | Jul 3 2026 | Jul 17 2026 | Aug 7 2026 | Aug 14 2026 | Aug 21 2026 | Aug 27 2026 | Sep 3 2026 | Sep 13 2026 |
 | macOS build | `sw_vers` → `BuildVersion` | `26A5368g` (27.0 Beta 2) | `26A5378j` (27.0 Beta 3) | `26A5388g` (27.0 Beta 4) | `26A5406e` (27.0 Beta 5) | `26A5416b` (27.0 Beta 6) | `26A5421a` (27.0 Beta 7) | `26A5425a` (27.0 Beta 8) | `26A428` (27.0 RC) | `26B5086k` (27.2 Beta) |
 
+New fingerprint dimension on the 27.2 beta: `fm respond --model system --show-assets`
+prints the exact asset bundles behind each inference — on `26B5086k` that is
+`com.apple.fm.language.instruct_3b.fm_api_generic.draft_14.1000.81321.13.205102,0`,
+`…instruct_3b.tokenizer_14.1000.0.13.205099,0`, and
+`…instruct_3b.fm_api_generic_14.1000.0.13.103386,0`. The on-device model is `instruct_3b`.
+Asset IDs are finer-grained than the `fm` source version — they move when Apple swaps
+weights without rebuilding the CLI. Check them alongside the binary in future audits.
+
 Audit recipe after any OS update:
 
 1. **Structure** — regenerate the CLI tree and diff it against the committed copy:
