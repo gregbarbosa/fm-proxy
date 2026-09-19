@@ -81,6 +81,20 @@ read fine). This is a hardening change vs the macOS 15.1 era, when that path was
 publicly readable. Dir mtimes (Sep 18 17:51) stamp the install event; `--show-assets`
 is the only sanctioned inventory window.
 
+The model catalog itself leaks through `modelmanagerd` logs (`log show --last 24h --debug
+--predicate 'eventMessage CONTAINS "ModelCatalog"'`). On `26B5086k` it lists, beyond
+`instruct_3b.fm_api_generic` (the `system` model, with `image_encoder` and `.draft`
+speculative-decode assets): seven `instruct_3b` task adapters (content_tagger,
+machine_translation, messages_action, personalized_smart_reply, summarization,
+urgency_classification), a `instruct_300m` family (emoji_keyword_extraction,
+factual_consistency_classifier, open_ended_extract, **safety**), a 9M
+text_event_extraction_classifier, the `instruct_server_v2` PCC client bundle ("zap"
+assets), token input/output deny-list templates (`com.apple.gm.safety_deny.*`,
+`com.apple.gm.safety_embedding_deny.all`), a safety output configuration, and
+`com.apple.fm.service.vlu.v1` (`com.apple.gm.pcc_inference_provider`). Adapter-per-task
+on a shared 3B base matches Apple's published architecture; `.draft` assets pair with
+speculative decoding.
+
 Audit recipe after any OS update:
 
 1. **Structure** — regenerate the CLI tree and diff it against the committed copy:
