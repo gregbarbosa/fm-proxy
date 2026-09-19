@@ -50,8 +50,9 @@ tree). Every behaviour the proxy depends on survived the jump.
 > reach `pcc` at all. From Terminal.app it still fails — see the audit note: this seed
 > has a broken entitlement check (`modelmanagerd` cannot read fm's own
 > `com.apple.modelmanager.inference` entitlement at runtime), so every PCC session is
-> refused and `fm` prints "The system is not ready." A reboot is worth one try; past
-> that it is a seed bug, not settling: `system` stays healthy throughout.
+> refused and `fm` prints "The system is not ready." A full reboot did not clear it,
+> so it is a confirmed seed bug, not settling: file via Feedback Assistant.
+> `system` stays healthy throughout.
 
 | Feature | State |
 |---|---|

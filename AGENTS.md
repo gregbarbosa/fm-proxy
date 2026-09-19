@@ -352,8 +352,9 @@ dispatch schema wins.
   `codesign -d --entitlements :- /usr/bin/fm` shows `com.apple.modelmanager.inference`
   `true` — so the daemon's runtime read of a valid Apple signature is what broke. The
   local model is unaffected: its bundle policy does not run this check. Deterministic,
-  so waiting does nothing. Try a reboot (rebuilds trust caches); if it survives that,
-  it is a seed bug to file, not to debug around.
+  so waiting does nothing. **A full reboot on 2026-09-19 did not clear it** — that was
+  the last plausible settling explanation, so this is a confirmed seed bug: file it via
+  Feedback Assistant and watch the trackers; do not debug around it.
 - **`com.apple.SensitiveContentAnalysisML error 15` is environmental.** It appears on a
   machine still settling after an OS update, and it clears itself: on the RC it cleared
   in about 20 to 30 minutes with no intervention. An experiment ruled out both the cyclic
