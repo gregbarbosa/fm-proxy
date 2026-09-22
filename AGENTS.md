@@ -211,7 +211,7 @@ The proxy is a drop-in OpenAI endpoint — point any OpenAI client at it and go:
     streamed and ends the completion with `finish_reason:"content_filter"` — so SDK
     clients receive the partial + a documented finish_reason instead of an exception.
     Deterministic + terminal (retrying the identical request re-fails identically), so
-    don't retry; change the request (rephrase or simplify — there is no second model).
+    don't retry; change the request (rephrase or simplify, or use `pcc` where it is available).
     Benign code triggers it — it is **not** a judgment that your content is unsafe.
   - `type: "invalid_request_error"` (`code: "invalid_request"`) — any upstream HTTP 400,
     such as an unknown model name or `n > 1`. Terminal: fm serve rejects it in ~7 ms and
@@ -232,8 +232,8 @@ The proxy is a drop-in OpenAI endpoint — point any OpenAI client at it and go:
     pin) is rejected with `500 "An unsupported generation guide was used."` Deterministic
     and permanent (retrying re-fails identically), so the proxy does **not** retry it —
     without this it would retry-loop a permanent bug for ~19.5s before surfacing it
-    mislabeled as `rate_limit_exceeded`. Use `tool_choice:"auto"`, or omit it. There is
-    no second model to switch to.
+    mislabeled as `rate_limit_exceeded`. Use `tool_choice:"auto"`, or omit it. Through the
+    proxy a forced call is translated instead, so this error does not reach a proxy client.
   - `type: "server_error"` (`code: "internal_error"` / `"upstream_unreachable"`) —
     anything else, including the `502` when `fm serve` is down.
 
@@ -262,7 +262,7 @@ re-derive it from the release history below.
 | Titled string schema | `400` unless it carries a non-empty `enum` |
 | `array<array<object>>` tool param | Accepted natively |
 | Vision | Real image understanding. A 256 px PNG costs 131 `prompt_tokens`. |
-| Private Cloud Compute | Back as a second model. `GET /v1/models` lists `system,pcc`, and a `pcc` request is accepted — but only when `fm serve` itself runs from a Terminal.app context. Otherwise it 503s fast: `Model 'pcc' is unavailable: Private Cloud Compute is not available in this context. Please use the Terminal app.` From Terminal.app, `fm respond --model pcc "Say hi"` answers. Beta 1 failed there with `The system is not ready.`; see the operational note. `pcc` through `fm serve` is not yet measured. |
+| Private Cloud Compute | Back as a second model. `GET /v1/models` lists `system,pcc`, and a `pcc` request is accepted — but only when `fm serve` itself runs from a Terminal.app context. Otherwise it 503s fast: `Model 'pcc' is unavailable: Private Cloud Compute is not available in this context. Please use the Terminal app.` From Terminal.app, `fm respond --model pcc "Say hi"` answers. Beta 1 failed there with `The system is not ready.`; see the operational note. With `fm serve` launched from Terminal.app, `pcc` works direct and through the proxy. See "Private Cloud Compute on 27.2 Beta 2". |
 | Unknown model name | `400 Unknown model 'gpt-4o'. Available models: system, pcc. Start fm serve with --model-provider to reach other models.` With a `default-model-provider` set, `fm serve` sends the name to that provider instead. If the provider is down, the reply is `500 Could not connect to the server.` |
 | `--model-provider` client paths | fm appends `/v1/chat/completions` to the base URL and POSTs `stream:true` SSE with `stream_options.include_usage` (captured on a local listener). Register the bare host — for LM Studio `http://127.0.0.1:1234`, not `…/v1`. Model listing probes `{base}/models` without the `/v1`, which LM Studio does not serve; the error is cosmetic, chat works regardless. The `messages` array passes through verbatim: **no system prompt of fm's own** — `-i/--instructions` becomes the literal `system` message, otherwise the request carries only the user turn (plus empty `tools` and the `-m` id as `model`). |
 | Cross-site headers | `403 Cross-site requests are not allowed.` if the request carries `Origin`, `Referer`, or `Sec-Fetch-*` |
@@ -276,6 +276,27 @@ local research. Read it with `fm license --show` and check it with `fm license
 Acceptance survives an OS update, but a version bump makes the user re-accept — expect
 one `sudo fm license` after each such update. Beta 2 kept `FM1 version 1.1` and the same
 clause, so the Beta 1 acceptance still holds.
+
+#### Private Cloud Compute on 27.2 Beta 2
+
+Measured 2026-09-22 with `fm serve` launched from Terminal.app. The proxy needs no
+`pcc`-specific code.
+
+| Behaviour | `pcc` |
+|---|---|
+| `/health` | Lists `pcc` as available, with a `quota` object: `limit_reached`, `approaching_limit` |
+| Prompt framing | `hello world` is 53 `prompt_tokens`. `system` is 57. |
+| Context window | About 32k. 31,555 passes, ~33,055 overflows with `context_length_exceeded`. |
+| Large prompts | Can fail with `LanguageModelError error -1` and succeed on a later try. It happened at 24k and 30k while 31.5k passed. Read it as a rate limit, as on 27.0. |
+| Streaming | Works through the proxy, with one usage frame |
+| Tool calling, auto | Never populates `tool_calls`. Markers leaked in 7 of 10 replies. |
+| Forced `tool_choice`, raw | `200`, but the model ignores it and answers in prose |
+| Forced `tool_choice`, via proxy | A real `tool_call` with valid arguments |
+| `n > 1` | `400`, as on `system` |
+| `reasoning_effort` | Accepted. The proxy removes it anyway. |
+
+Caution: every `pcc` request uses the account's Private Cloud Compute quota. Keep probes
+few, and check the `quota` object in `/health` before a long run.
 
 #### Tool-call replies leak chat-template markers
 
@@ -440,7 +461,7 @@ authoritative for what is true now.
 | Beta 8 `26A5425a` | 2.0.68.1.402 | Rebuilt binary, identical CLI surface. No behaviour change. Audit fixed a proxy bug: a capped stream emitted two `finish_reason` values. |
 | RC `26A428` | 2.0.68.1.402 | Rebuilt binary, identical CLI surface. The RC audit found the tool-call marker leak. A clean-room record shows Beta 7 leaked too. |
 | 27.2 Beta `26B5086k` | 2.1.7.1.901 | **PCC model returned**, gated to Terminal.app contexts, with `fm quota-usage` restored and `fm available` renamed `fm models`. New `--model-provider` / `--model-provider-header` routing with a `fm config` tree; `fm serve` routes non-built-in models upstream. Licence bumped to `FM1 version 1.1`, same operative clause. Audit: every known wall holds (tool calling, cyclic hang, framing 57, window 4096, 400s); marker leak persists; forced dispatch still works. PCC fails in this seed: modelmanagerd cannot read fm's inference entitlement at runtime, so `systemNotReady` is deterministic, not settling. |
-| 27.2 Beta 2 `26B5091g` | 2.1.8.1.900 | Identical CLI surface, licence and model asset IDs. **PCC works from Terminal.app**: the entitlement fault is fixed. `$defs` entries no longer need `x-order` or `additionalProperties`. A cyclic `$defs` now hangs the model service below `fm serve` for about 2 minutes, and a restart of `fm serve` does not clear it. Tool-call content moved mostly to bare `{"tool_call": ...}` JSON, with markers in 1 of 20 replies. Every other wall holds. No proxy code change. |
+| 27.2 Beta 2 `26B5091g` | 2.1.8.1.900 | Identical CLI surface, licence and model asset IDs. **PCC works from Terminal.app**, direct and through the proxy, with a window of about 32k: the entitlement fault is fixed. `$defs` entries no longer need `x-order` or `additionalProperties`. A cyclic `$defs` now hangs the model service below `fm serve` for about 2 minutes, and a restart of `fm serve` does not clear it. Tool-call content moved mostly to bare `{"tool_call": ...}` JSON, with markers in 1 of 20 replies. Every other wall holds. No proxy code change. |
 
 Beta 7, Beta 8 and the RC shared `fm` 2.0.68.1.402 and a byte-identical help tree, so
 only the binary's mtime distinguished them. The 27.2 beta broke that streak with a
@@ -566,7 +587,8 @@ A one-line message frames to 57 `prompt_tokens`.
 ### Context budget
 
 The window is 4096 tokens, and that is the whole budget. A 4045-token prompt passes and
-about 4255 overflows. PCC and its larger window are gone.
+about 4255 overflows on `system`. On 27.2, `pcc` has a window of about 32k, but only from
+a Terminal.app context.
 
 An agent client's own gauge reads low, because it counts only `messages[].content` while
 `fm serve` also frames three things into the prompt:

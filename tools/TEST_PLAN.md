@@ -83,8 +83,8 @@ It asserts what a client depends on, rather than what the proxy intends:
 `pi` reports "The session's transcript exceeded the model's context size". This is the
 repo, not `pi`: the check runs here, and `pi` loads `AGENTS.md` as project context — one
 40 KB file is ~8.4k tokens against a 4096-token window. The same `pi` command in an
-empty directory assembles to 1188 tokens and returns 200. Beta 7 removed `pcc`, so there
-is no larger window to fall back to. The script prints `KNOWN` for this case. Treat any
+empty directory assembles to 1188 tokens and returns 200. The 32k `pcc` window returned
+in 27.2, but only from a Terminal.app context, and the check does not use it. The script prints `KNOWN` for this case. Treat any
 other pi failure as real.
 
 As of 2026-08-31 the check reports a plain `FAIL` with an empty message instead, because
