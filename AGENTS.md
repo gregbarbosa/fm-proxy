@@ -61,13 +61,13 @@ reference carries them in the discussion block. Root help's MODELS section lists
 `fm --version` does **not** exist (errors "Unknown option"). To detect when Apple ships a
 new `fm`/FoundationModels build across macOS betas, fingerprint the binary:
 
-| What | How | Beta 2 value | Beta 3 value | Beta 4 value | Beta 5 value | Beta 6 value | Beta 7 value | Beta 8 value | 27.0 RC | 27.2 Beta |
-|---|---|---|---|---|---|---|---|---|---|---|
-| fm source version | `otool -l /usr/bin/fm \| grep -A2 LC_SOURCE_VERSION` | `2.0.55.1.402` | `2.0.59` | `2.0.62.1.402` | `2.0.68.1.401` | `2.0.68.1.401` | `2.0.68.1.402` | `2.0.68.1.402` | `2.0.68.1.402` | `2.1.7.1.901` |
-| Framework version | `plutil -p /System/Library/Frameworks/FoundationModels.framework/Resources/Info.plist \| grep CFBundleVersion` | `2.0.55.1.402` | `2.0.59` | `2.0.62.1.402` | `2.0.68.1.401` | `2.0.68.1.401` | `2.0.68.1.402` | `2.0.68.1.402` | `2.0.68.1.402` | `2.1.7.1.901` |
-| Runtime version | `codesign -dvvv /usr/bin/fm` → `Runtime Version=` | `27.0.0` | `27.0.0` | `27.0.0` | `27.0.0` | `27.0.0` | `27.0.0` | `27.0.0` | `27.0.0` | `27.2.0` |
-| Rebuild date | `ls -la /usr/bin/fm` (mtime) | Jun 19 2026 | Jul 3 2026 | Jul 17 2026 | Aug 7 2026 | Aug 14 2026 | Aug 21 2026 | Aug 27 2026 | Sep 3 2026 | Sep 13 2026 |
-| macOS build | `sw_vers` → `BuildVersion` | `26A5368g` (27.0 Beta 2) | `26A5378j` (27.0 Beta 3) | `26A5388g` (27.0 Beta 4) | `26A5406e` (27.0 Beta 5) | `26A5416b` (27.0 Beta 6) | `26A5421a` (27.0 Beta 7) | `26A5425a` (27.0 Beta 8) | `26A428` (27.0 RC) | `26B5086k` (27.2 Beta) |
+| What | How | Beta 2 value | Beta 3 value | Beta 4 value | Beta 5 value | Beta 6 value | Beta 7 value | Beta 8 value | 27.0 RC | 27.2 Beta | 27.2 Beta 2 |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| fm source version | `otool -l /usr/bin/fm \| grep -A2 LC_SOURCE_VERSION` | `2.0.55.1.402` | `2.0.59` | `2.0.62.1.402` | `2.0.68.1.401` | `2.0.68.1.401` | `2.0.68.1.402` | `2.0.68.1.402` | `2.0.68.1.402` | `2.1.7.1.901` | `2.1.8.1.900` |
+| Framework version | `plutil -p /System/Library/Frameworks/FoundationModels.framework/Resources/Info.plist \| grep CFBundleVersion` | `2.0.55.1.402` | `2.0.59` | `2.0.62.1.402` | `2.0.68.1.401` | `2.0.68.1.401` | `2.0.68.1.402` | `2.0.68.1.402` | `2.0.68.1.402` | `2.1.7.1.901` | `2.1.8.1.900` |
+| Runtime version | `codesign -dvvv /usr/bin/fm` → `Runtime Version=` | `27.0.0` | `27.0.0` | `27.0.0` | `27.0.0` | `27.0.0` | `27.0.0` | `27.0.0` | `27.0.0` | `27.2.0` | `27.2.0` |
+| Rebuild date | `ls -la /usr/bin/fm` (mtime) | Jun 19 2026 | Jul 3 2026 | Jul 17 2026 | Aug 7 2026 | Aug 14 2026 | Aug 21 2026 | Aug 27 2026 | Sep 3 2026 | Sep 13 2026 | Sep 19 2026 |
+| macOS build | `sw_vers` → `BuildVersion` | `26A5368g` (27.0 Beta 2) | `26A5378j` (27.0 Beta 3) | `26A5388g` (27.0 Beta 4) | `26A5406e` (27.0 Beta 5) | `26A5416b` (27.0 Beta 6) | `26A5421a` (27.0 Beta 7) | `26A5425a` (27.0 Beta 8) | `26A428` (27.0 RC) | `26B5086k` (27.2 Beta) | `26B5091g` (27.2 Beta 2) |
 
 New fingerprint dimension on the 27.2 beta: `fm respond --model system --show-assets`
 prints the exact asset bundles behind each inference — on `26B5086k` that is
@@ -115,8 +115,8 @@ Audit recipe after any OS update:
    reverse also happens, so re-test the known walls separately. Run the three test
    layers in `tools/TEST_PLAN.md`, then re-check by hand:
    - tool calling — still broken upstream (`tool_calls` never populated)
-   - `$defs` in `response_format` — undecorated 400s; a **cyclic** one hangs `fm serve`
-     permanently, so test it last and restart the server afterwards
+   - `$defs` in `response_format` — an entry with no `title` 400s; a **cyclic** one
+     hangs the model service, so test it last and wait for a control request to pass
    - forced `tool_choice` — raw `fm serve` still answers 500 "unsupported generation
      guide". Through the proxy it must return a real `tool_call`: forced dispatch now
      depends on `response_format` and constrained decoding continuing to work, so if
@@ -128,15 +128,17 @@ Audit recipe after any OS update:
    - prompt framing — `hello world` should be 57 `prompt_tokens`
    - the 4096-token window — a ~4056-token prompt passes, ~8056 does not
    - tool-call content — check the reply text for `<start_of_turn>` and `<ctrl NN>`
-     markers, and send at least 10 requests, because the leak is intermittent
+     markers, and for a bare `{"tool_call": ...}` object. Send at least 10 requests,
+     because the leak is intermittent
 3. **Licence** — run `fm license --status` and `fm license --show`. Both print without
    prompting. Compare the agreed version and the terms against the previous section.
 
 Record the result as a new section, and fold the previous one into the release-history
 table.
 
-Warning: a cyclic `$defs` request hangs `fm serve` permanently. Run that test last, and
-restart `fm serve` afterwards.
+Warning: a cyclic `$defs` request hangs the model service below `fm serve`. Run that test
+last. A restart of `fm serve` does not clear the hang. Poll a control request until it
+passes.
 
 Caution: for the first hour after an OS update, do not trust a failure. The machine may
 still be settling its model assets, and `com.apple.SensitiveContentAnalysisML error 15`
@@ -237,14 +239,14 @@ The proxy is a drop-in OpenAI endpoint — point any OpenAI client at it and go:
 
 ### Upstream behaviour on the 27.2 beta
 
-Audited 2026-09-18 against a live `fm serve` on `system`, build `26B5086k`, `fm`
-2.1.7.1.901. This table is the single statement of what `fm serve` does; do not
+Audited 2026-09-22 against a live `fm serve` on `system`, build `26B5091g` (27.2 Beta 2),
+`fm` 2.1.8.1.900. This table is the single statement of what `fm serve` does; do not
 re-derive it from the release history below.
 
 | Behaviour | What `fm serve` does |
 |---|---|
 | Tool calling | Never populates `tool_calls`. `finish_reason` is `stop`. |
-| Tool-call content | Leaks raw chat-template markers. See below. |
+| Tool-call content | Puts the call in `content`, as bare JSON or with raw chat-template markers. See below. |
 | Forced `tool_choice` | `500 An unsupported generation guide was used.` on a non-streaming request. On an SSE request the failure arrives as an `event: error` frame under HTTP 200 instead. The proxy routes around it either way. |
 | Tool with no `function.description` | `400` for the whole request |
 | `stream` omitted | Returns `text/event-stream`, not one JSON object |
@@ -252,15 +254,16 @@ re-derive it from the release history below.
 | `parallel_tool_calls` | Accepted, then ignored |
 | `max_tokens` | Ignored. The proxy truncates. |
 | Prompt framing | `hello world` is 57 `prompt_tokens` |
-| Context window | 4096 tokens. 4075 passes, ~4099 overflows. |
+| Context window | 4096 tokens. 4005 passes, ~4150 overflows. |
 | `$defs` + dialect, non-cyclic | `200` in one to three seconds |
-| `$defs` + dialect, **cyclic** | Hangs permanently. Restart `fm serve`. |
-| `$defs`, no dialect | `400` naming `x-order` |
+| `$defs` entry with `title` and `required`, no `x-order` or `additionalProperties` | `200`. Objects nested in the entry need no keys. |
+| `$defs` entry with no `title` | `400` naming `undefinedReferences` |
+| `$defs`, **cyclic** | Can return `200` when the model stops the recursion early. A prompt that makes it recurse hangs the model service below `fm serve`: every request fails, `fm respond` included, and a restart of `fm serve` does not help. It cleared by itself about 2 minutes after one cyclic request. |
 | Titled string schema | `400` unless it carries a non-empty `enum` |
 | `array<array<object>>` tool param | Accepted natively |
 | Vision | Real image understanding. A 256 px PNG costs 131 `prompt_tokens`. |
-| Private Cloud Compute | Back as a second model. `GET /v1/models` lists `system,pcc`, and a `pcc` request is accepted — but only when `fm serve` itself runs from a Terminal.app context. Otherwise it 503s fast: `Model 'pcc' is unavailable: Private Cloud Compute is not available in this context. Please use the Terminal app.` From Terminal.app this seed still fails deterministically: modelmanagerd cannot read fm's `com.apple.modelmanager.inference` entitlement at runtime (`SecTaskCopyValueForEntitlement failed`), refuses the session, and fm prints `The system is not ready.` See the operational note. |
-| Unknown model name | `400 Unknown model 'gpt-4o'. Available models: system, pcc. Start fm serve with --model-provider to reach other models.` |
+| Private Cloud Compute | Back as a second model. `GET /v1/models` lists `system,pcc`, and a `pcc` request is accepted — but only when `fm serve` itself runs from a Terminal.app context. Otherwise it 503s fast: `Model 'pcc' is unavailable: Private Cloud Compute is not available in this context. Please use the Terminal app.` From Terminal.app, `fm respond --model pcc "Say hi"` answers. Beta 1 failed there with `The system is not ready.`; see the operational note. `pcc` through `fm serve` is not yet measured. |
+| Unknown model name | `400 Unknown model 'gpt-4o'. Available models: system, pcc. Start fm serve with --model-provider to reach other models.` With a `default-model-provider` set, `fm serve` sends the name to that provider instead. If the provider is down, the reply is `500 Could not connect to the server.` |
 | `--model-provider` client paths | fm appends `/v1/chat/completions` to the base URL and POSTs `stream:true` SSE with `stream_options.include_usage` (captured on a local listener). Register the bare host — for LM Studio `http://127.0.0.1:1234`, not `…/v1`. Model listing probes `{base}/models` without the `/v1`, which LM Studio does not serve; the error is cosmetic, chat works regardless. The `messages` array passes through verbatim: **no system prompt of fm's own** — `-i/--instructions` becomes the literal `system` message, otherwise the request carries only the user turn (plus empty `tools` and the `-m` id as `model`). |
 | Cross-site headers | `403 Cross-site requests are not allowed.` if the request carries `Origin`, `Referer`, or `Sec-Fetch-*` |
 
@@ -271,7 +274,8 @@ EXCEPT AS EXPRESSLY PERMITTED", which is exactly what `fm-proxy` does. Keep it t
 local research. Read it with `fm license --show` and check it with `fm license
 --status`; both print without prompting, once a privileged user has accepted it.
 Acceptance survives an OS update, but a version bump makes the user re-accept — expect
-one `sudo fm license` after each such update.
+one `sudo fm license` after each such update. Beta 2 kept `FM1 version 1.1` and the same
+clause, so the Beta 1 acceptance still holds.
 
 #### Tool-call replies leak chat-template markers
 
@@ -306,6 +310,13 @@ this run surfaced `[ToolCall{FunctionName:get_weather,Arguments:{city:<ctrl46>Pa
 alongside the familiar `<start_of_turn>` shapes. Underneath the markers the call is still
 correct. `tool_calls` was populated 0 of 10 times, all `finish_reason: stop`. With
 `FM_STRIP_TEMPLATE_MARKERS=1`, 0 of 10 leaked through the proxy.
+
+Re-measured on 27.2 Beta 2, 2026-09-22, with 20 direct requests over two prompts and one
+tool. The shape changed. Markers appeared in only 1 of 20 replies, but 10 of 20 replies
+held the call as bare JSON in `content`: `{"tool_call": [{"name": "get_weather", ...`.
+`tool_calls` was populated 0 of 20 times. `FM_STRIP_TEMPLATE_MARKERS` does not touch the
+bare JSON, so a client still gets the call as text. A marker-only check calls this build
+clean when it is not; grep for `"tool_call"` too.
 
 The markers are single tokens in the vocabulary, so each arrives whole in one delta and
 never straddles a chunk boundary. That is why a per-delta regex is enough and no
@@ -361,7 +372,9 @@ dispatch schema wins.
   refused while the same command in Terminal.app proceeds. `fm serve` inherits the
   context it was launched from, so a proxy in front of a herdr-launched `fm serve`
   cannot reach `pcc` either. Launch the stack from Terminal.app if you want to test it.
-- **PCC `systemNotReady` on the 27.2 beta is a broken entitlement check, not settling.**
+- **27.2 Beta 2 fixed the PCC entitlement check.** On `26B5091g`, `fm respond --model pcc`
+  from Terminal.app answers. The history of the Beta 1 fault follows.
+- **PCC `systemNotReady` on 27.2 Beta 1 was a broken entitlement check, not settling.**
   First read as the usual post-update settling, falsified by a log capture two hours
   later (`log stream --level debug --predicate 'subsystem == "com.apple.fm"'`, attempt
   from Terminal.app). The attempt clears the context gate and iCloud check (`User is
@@ -375,8 +388,7 @@ dispatch schema wins.
   `true` — so the daemon's runtime read of a valid Apple signature is what broke. The
   local model is unaffected: its bundle policy does not run this check. Deterministic,
   so waiting does nothing. **A full reboot on 2026-09-19 did not clear it** — that was
-  the last plausible settling explanation, so this is a confirmed seed bug: file it via
-  Feedback Assistant and watch the trackers; do not debug around it.
+  the last plausible settling explanation, so it was a confirmed seed bug.
 - **`com.apple.SensitiveContentAnalysisML error 15` is environmental.** It appears on a
   machine still settling after an OS update, and it clears itself: on the RC it cleared
   in about 20 to 30 minutes with no intervention. An experiment ruled out both the cyclic
@@ -428,6 +440,7 @@ authoritative for what is true now.
 | Beta 8 `26A5425a` | 2.0.68.1.402 | Rebuilt binary, identical CLI surface. No behaviour change. Audit fixed a proxy bug: a capped stream emitted two `finish_reason` values. |
 | RC `26A428` | 2.0.68.1.402 | Rebuilt binary, identical CLI surface. The RC audit found the tool-call marker leak. A clean-room record shows Beta 7 leaked too. |
 | 27.2 Beta `26B5086k` | 2.1.7.1.901 | **PCC model returned**, gated to Terminal.app contexts, with `fm quota-usage` restored and `fm available` renamed `fm models`. New `--model-provider` / `--model-provider-header` routing with a `fm config` tree; `fm serve` routes non-built-in models upstream. Licence bumped to `FM1 version 1.1`, same operative clause. Audit: every known wall holds (tool calling, cyclic hang, framing 57, window 4096, 400s); marker leak persists; forced dispatch still works. PCC fails in this seed: modelmanagerd cannot read fm's inference entitlement at runtime, so `systemNotReady` is deterministic, not settling. |
+| 27.2 Beta 2 `26B5091g` | 2.1.8.1.900 | Identical CLI surface, licence and model asset IDs. **PCC works from Terminal.app**: the entitlement fault is fixed. `$defs` entries no longer need `x-order` or `additionalProperties`. A cyclic `$defs` now hangs the model service below `fm serve` for about 2 minutes, and a restart of `fm serve` does not clear it. Tool-call content moved mostly to bare `{"tool_call": ...}` JSON, with markers in 1 of 20 replies. Every other wall holds. No proxy code change. |
 
 Beta 7, Beta 8 and the RC shared `fm` 2.0.68.1.402 and a byte-identical help tree, so
 only the binary's mtime distinguished them. The 27.2 beta broke that streak with a
@@ -477,8 +490,9 @@ streaming chat, streaming usage relay, `stream`-omitted → JSON, structured out
 > request fails with `com.apple.SensitiveContentAnalysisML error 15`,
 > `LanguageModelError error -1`, or a hang — regardless of what you are testing.
 > Those errors are a property of the server's state, not a verdict about the feature
-> under test. Restart `fm serve` and re-run a control that is known to pass before you
-> trust any negative result. An early Beta 5 run wrongly concluded that object `title`
+> under test. Re-run a control that is known to pass before you trust any negative
+> result. On the 27.0 builds a restart of `fm serve` clears the state. On 27.2 Beta 2 it
+> does not, so wait until the control passes. An early Beta 5 run wrongly concluded that object `title`
 > caused a hang; it passes on a clean server.
 >
 > The error 15 part of that caution did not reproduce on the 27.0 RC. A deliberate hang
@@ -580,6 +594,10 @@ entries themselves, and any object nested inside one, recursively, including arr
 The top-level schema and any object reached purely through inline `properties` nesting
 need none. A missing key raises an error that names it, such as `keyNotFound 'x-order'`.
 
+27.2 Beta 2 relaxed the rule. A `$defs` entry needs only `title`, which names the type,
+and `required`. Without `title` the `400` names `undefinedReferences`. The 27.0 builds
+still need all four keys.
+
 Two shapes to avoid:
 
 - A `title` on a string schema makes it a named string type, which then requires a
@@ -594,6 +612,6 @@ to injecting the dialect only when a schema cannot be inlined. This matters beca
 pydantic, zod-to-json-schema, and TypeBox all emit `$defs`/`$ref` for named types, so an
 ordinary client would otherwise get a `400`.
 
-Warning: a cyclic `$defs` has no finite inline form, and forwarding one hangs `fm serve`
-permanently. The proxy rejects it with `400` `cyclic_schema` before it opens an upstream
+Warning: a cyclic `$defs` has no finite inline form, and forwarding one can hang the
+model service. The proxy rejects it with `400` `cyclic_schema` before it opens an upstream
 connection.

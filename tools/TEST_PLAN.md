@@ -102,7 +102,9 @@ once before you investigate.
 If several unrelated checks fail at once, suspect a poisoned server rather than the
 code: a cyclic `$defs` request hangs `fm serve` and it answers nothing afterwards. The proxy
 now rejects those before they are forwarded, but a direct request still does it.
-Restart `fm serve` and re-run.
+Restart `fm serve` and re-run. On 27.2 Beta 2 the hang sits below `fm serve`, so a
+restart does not clear it. Poll a control request instead; it passed about 2 minutes
+after one cyclic request.
 
 Expect the first request after that restart to take about 25 seconds while the model
 reloads. Do not read the delay as a second failure.
