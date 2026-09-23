@@ -1,5 +1,6 @@
 const { test } = require("node:test");
 const assert = require("node:assert");
+const http = require("node:http");
 const { startStack, request, rewriteBody } = require("./helpers");
 
 // ── Server basics ─────────────────────────────────────────────────────────────
@@ -344,4 +345,30 @@ test("bind: PROXY_HOST=0.0.0.0 opens the proxy to the network", async (t) => {
   const stack = await startStack({ env: { PROXY_HOST: "0.0.0.0" } });
   t.after(() => stack.stop());
   assert.match(stack.getStdout(), /listening on http:\/\/0\.0\.0\.0:/);
+});
+
+test("a chunked upload reaches fm serve with Content-Length and no Transfer-Encoding", async (t) => {
+  let seen = null;
+  const stack = await startStack({ handler: (req, parsed, res) => {
+    seen = { cl: req.headers["content-length"], te: req.headers["transfer-encoding"], parsed };
+    res.writeHead(200, { "content-type": "application/json" });
+    res.end(JSON.stringify({ choices: [{ index: 0, message: { role: "assistant", content: "ok" },
+      finish_reason: "stop" }], usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 } }));
+  } });
+  t.after(() => stack.stop());
+  const body = JSON.stringify({ model: "system", stream: false, messages: [{ role: "user", content: "hi" }] });
+  const status = await new Promise((resolve, reject) => {
+    const req = http.request({ host: "127.0.0.1", port: stack.proxyPort, method: "POST",
+      path: "/v1/chat/completions", headers: { "content-type": "application/json" } }, (res) => {
+      res.resume();
+      res.on("end", () => resolve(res.statusCode));
+    });
+    req.on("error", reject);
+    req.write(body.slice(0, 10));
+    setTimeout(() => req.end(body.slice(10)), 20);
+  });
+  assert.strictEqual(status, 200);
+  assert.strictEqual(seen.te, undefined);
+  assert.strictEqual(Number(seen.cl), Buffer.byteLength(JSON.stringify(seen.parsed)));
+  assert.strictEqual(seen.parsed.messages[0].content, "hi");
 });

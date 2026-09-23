@@ -4,13 +4,14 @@ Three layers. Run them in order. Each catches what the layer above cannot.
 
 | Layer | Command | Catches | Needs a live model? |
 |---|---|---|---|
-| 1. Unit and integration | `node --test fm-proxy.test.js` | Schema logic, error typing, framing constants | No |
+| 1. Unit and integration | `npm test` | Schema logic, error typing, relays, framing constants | No |
 | 2. Wire baseline | `node tools/wire-baseline.js <out.json>` | Any change to what the proxy sends upstream or returns | No |
-| 3. Harness check | `tools/harness-check.sh` | Whether a real client can actually use it | Yes |
+| 3. Live checks | `node tools/deviation-probe.js 1977` | Whether each `fm serve` deviation is still handled on this build | Yes |
 
 ## Layer 1 — unit and integration
 
-`node --test fm-proxy.test.js`. Expect **144 pass, 0 fail**.
+`npm test`. Expect **153 pass, 0 fail**. Without `fm`, as on a CI runner, expect 151 pass
+and 2 skipped.
 
 A skipped test means the `fm` CLI is unavailable. Check the licence with `fm license
 --status`, which prints without prompting. Run `sudo fm license` only if it reports no
@@ -59,40 +60,23 @@ a diff:
   serve, and a `response_format` dispatch schema goes instead
 - an **auto** `tool_choice` is untouched and still forwards `tools` natively
 
-## Layer 3 — harness check
+## Layer 3 — live checks
 
-Start the stack first (`./fm-launch.sh`, or `fm serve` plus `node fm-proxy.js`), then:
+Start the stack first (`./fm-launch.sh`), then:
 
 ```bash
-tools/harness-check.sh          # on-device model
+node tools/deviation-probe.js 1977
 ```
 
-It asserts what a client depends on, rather than what the proxy intends:
+It sends one request for each known `fm serve` deviation and reports whether the proxy
+still handles it. Expect **11 of 11 handled**.
 
-1. A request that omits `stream` returns parseable JSON, not an event stream.
-2. Non-streaming responses carry `usage.prompt_tokens` above zero, or a client's
-   context gauge reads empty.
-3. Every streaming frame parses as JSON.
-4. The stream ends with `data: [DONE]`.
-5. Exactly one usage frame arrives — not zero, not two.
-6. A five-turn conversation reports more prompt tokens than a one-turn conversation.
-7. `pi` completes a real round trip and returns the expected word.
-
-### Expected result that is not a failure
-
-`pi` reports "The session's transcript exceeded the model's context size". This is the
-repo, not `pi`: the check runs here, and `pi` loads `AGENTS.md` as project context — one
-40 KB file is ~8.4k tokens against a 4096-token window. The same `pi` command in an
-empty directory assembles to 1188 tokens and returns 200. The 32k `pcc` window returned
-in 27.2, but only from a Terminal.app context, and the check does not use it. The script prints `KNOWN` for this case. Treat any
-other pi failure as real.
-
-As of 2026-08-31 the check reports a plain `FAIL` with an empty message instead, because
-`pi` prints nothing at all. `pi` sends `max_completion_tokens: 1`, so the proxy labels
-the reply `length`, and `pi` hides a turn it believes was truncated.
-
-`length` is the honest label for a 1-token cap, so this check stays red until `pi` stops
-asking for one token. Five tests pin the single-`finish_reason` behaviour.
+The maintainer also runs `tools/harness-check.sh`, which is not in the repository because
+it drives `pi`. It asserts what a real client depends on: a JSON reply when `stream` is
+absent, usage on both paths, parseable frames, one usage frame, and a real `pi` round
+trip. It reports 6 passed and 1 failed. The `pi` case fails because `pi` sends
+`max_completion_tokens: 1`, the proxy correctly labels the reply `length`, and `pi` hides
+a turn it believes was truncated.
 
 ## Before you trust a failure
 

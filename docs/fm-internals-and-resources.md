@@ -1,7 +1,7 @@
 # Foundation Models internals & resources
 
 _Collected 2026-09-19 during the macOS 27.2 beta (`26B5086k`, `fm` 2.1.7.1.901) audit.
-Audit-relevant facts live in `AGENTS.md`; this file is the deeper reference: what the
+Audit-relevant facts live in `docs/audit.md` and `docs/upstream-behaviour.md`; this file is the deeper reference: what the
 on-device stack is made of, where everything lives, how to see it again, and the
 external resources worth keeping._
 
