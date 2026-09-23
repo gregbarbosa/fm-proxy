@@ -494,3 +494,14 @@ test("an unavailable model reaches the client after one upstream request", async
   assert.strictEqual(r.status, 503);
   assert.strictEqual(JSON.parse(r.body).error.code, "model_unavailable");
 });
+
+test("classifyError: a provider's wrapped 4xx is terminal", () => {
+  const c = classifyError('HTTP error with status code 400:\n{"error":{"message":"No models loaded."}}', 500);
+  assert.strictEqual(c.code, "provider_rejected");
+  assert.strictEqual(c.retry, false);
+});
+
+test("classifyError: a provider's wrapped 429 and 5xx stay retryable", () => {
+  assert.strictEqual(classifyError("HTTP error with status code 429: slow down", 500).retry, true);
+  assert.strictEqual(classifyError("HTTP error with status code 502: bad gateway", 500).retry, true);
+});

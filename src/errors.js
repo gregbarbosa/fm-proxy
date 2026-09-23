@@ -35,6 +35,12 @@ function classifyError(msg, status) {
   if (m.includes("not available in this context"))
     return { type: "invalid_request_error", code: "model_unavailable", retry: false,
              label: "MODEL UNAVAILABLE IN THIS CONTEXT" };
+  // With --model-provider, fm serve wraps the provider's own error in a 500:
+  // "HTTP error with status code 400: ...". A 4xx other than 429 re-fails on a retry.
+  const provider = m.match(/http error with status code (\d{3})/);
+  if (provider && provider[1][0] === "4" && provider[1] !== "429")
+    return { type: "invalid_request_error", code: "provider_rejected", retry: false,
+             label: `PROVIDER REJECTED (HTTP ${provider[1]})` };
   if (m.includes("languagemodelerror") || m.includes("error -1") || m.includes("rate limit") || m.includes("rate_limit"))
     return { type: "rate_limit_exceeded", code: -1, retry: true, label: "RATE-LIMIT" };
   // Any other 400 is a request-shape rejection, such as an unknown model. The branches
