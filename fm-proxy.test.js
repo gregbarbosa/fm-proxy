@@ -4,7 +4,19 @@ const assert = require("node:assert");
 const http = require("node:http");
 const { spawn } = require("node:child_process");
 const path = require("node:path");
-const { fixToolSchema, fixTools, fixResponseFormatSchema, findCyclicDefs, classifyError, errorFrame, fmTokenCount, _isLicenseGate, stripTemplateMarkers, truncateAtStop, buildToolDispatch, dispatchToToolCalls } = require("./fm-proxy.js");
+const { fixToolSchema, fixResponseFormatSchema, findCyclicDefs } = require("./src/schema");
+const { rewriteRequest } = require("./src/request");
+const { classifyError, errorFrame } = require("./src/errors");
+const { fmTokenCount, isLicenseGate } = require("./src/tokens");
+const { stripTemplateMarkers, truncateAtStop } = require("./src/text");
+const { buildToolDispatch, dispatchToToolCalls } = require("./src/dispatch");
+
+// rewriteRequest returns the parsed body. These tests read the serialised form.
+function fixTools(body) {
+  const r = rewriteRequest(body);
+  if (!r.parsed) return { body, parsed: null };
+  return { ...r, body: JSON.stringify(r.parsed), responseFormatCycle: r.cycle };
+}
 
 // fm serve decodes nested tool parameters natively at every depth, including
 // array<array<object>>. Verified live: flat schemas, object chains of any depth,
@@ -56,19 +68,19 @@ test("framing constants reproduce fm serve's prompt_tokens exactly", (t) => {
 // The CLI gates every subcommand behind `sudo fm license`, exiting 69 with a banner
 // on stderr. That is permanent, not transient, so the proxy latches it rather than
 // re-probing per count.
-test("_isLicenseGate recognises the licence gate (exit 69 + banner)", () => {
+test("isLicenseGate recognises the licence gate (exit 69 + banner)", () => {
   assert.strictEqual(
-    _isLicenseGate({ status: 69, stderr: "YOU HAVE NOT AGREED TO THE APPLE FOUNDATION MODELS CLI LEGAL NOTICE & TERMS.\n" }),
+    isLicenseGate({ status: 69, stderr: "YOU HAVE NOT AGREED TO THE APPLE FOUNDATION MODELS CLI LEGAL NOTICE & TERMS.\n" }),
     true,
   );
 });
 
-test("_isLicenseGate does not latch on unrelated failures", () => {
+test("isLicenseGate does not latch on unrelated failures", () => {
   // A missing binary, a timeout, or an unknown subcommand must stay retryable.
-  assert.strictEqual(_isLicenseGate({ status: 64, stderr: "Unknown subcommand 'token-count'" }), false);
-  assert.strictEqual(_isLicenseGate({ status: 69, stderr: "some other unavailability" }), false);
-  assert.strictEqual(_isLicenseGate({ code: "ENOENT" }), false);
-  assert.strictEqual(_isLicenseGate(undefined), false);
+  assert.strictEqual(isLicenseGate({ status: 64, stderr: "Unknown subcommand 'token-count'" }), false);
+  assert.strictEqual(isLicenseGate({ status: 69, stderr: "some other unavailability" }), false);
+  assert.strictEqual(isLicenseGate({ code: "ENOENT" }), false);
+  assert.strictEqual(isLicenseGate(undefined), false);
 });
 
 // ── tool parameters: $ref resolution ─────────────────────────────────────────
@@ -2450,4 +2462,26 @@ test("streaming dispatch: the synthesised frames carry the request's model", asy
   const r = await postChat(stack, JSON.stringify(body));
   const first = JSON.parse(r.body.split("\n").find((l) => l.startsWith("data: ")).slice(6));
   assert.strictEqual(first.model, "pcc");
+});
+
+test("streaming: a cap and a stop sequence in the same chunk both apply", async (t) => {
+  const stack = await startStack({ handler: (req, parsed, res) => {
+    res.writeHead(200, { "content-type": "text/event-stream" });
+    res.write(`data: ${JSON.stringify({ id: "x", object: "chat.completion.chunk", model: "system",
+      choices: [{ index: 0, delta: { content: "hello STOP world" }, finish_reason: "stop" }] })}\n\n`);
+    res.write(`data: ${JSON.stringify({ id: "x", object: "chat.completion.chunk", model: "system",
+      choices: [], usage: { prompt_tokens: 5, completion_tokens: 3, total_tokens: 8 } })}\n\n`);
+    res.write("data: [DONE]\n\n");
+    res.end();
+  } });
+  t.after(() => stack.stop());
+  const r = await postChat(stack, JSON.stringify({ model: "system", stream: true, max_tokens: 50,
+    stop: "STOP", messages: [{ role: "user", content: "hi" }] }));
+  let text = "";
+  for (const line of r.body.split("\n")) {
+    if (!line.startsWith("data: ") || line.includes("[DONE]")) continue;
+    const d = JSON.parse(line.slice(6)).choices?.[0]?.delta;
+    if (d && typeof d.content === "string") text += d.content;
+  }
+  assert.strictEqual(text, "hello ");
 });

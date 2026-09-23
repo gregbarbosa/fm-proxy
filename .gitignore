@@ -1,11 +1,13 @@
 .DS_Store
 
-# Local-only tools. They need software this repo does not ship: harness-check.sh
-# drives `pi`, and ask-image.sh is a manual one-off probe.
+# Local-only tools. harness-check.sh drives `pi`, ask-image.sh is a manual probe, and
+# usage-tap.js logs token use for `fm chat` sessions. None of them is part of the proxy.
 tools/harness-check.sh
 tools/ask-image.sh
+tools/usage-tap.js
 
 # Local tool artifacts and scratch work, not part of the proxy.
 .firecrawl/
 .fms/
 apple-clone/
+.claude/
