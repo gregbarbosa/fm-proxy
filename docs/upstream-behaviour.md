@@ -156,9 +156,9 @@ dispatch schema wins.
   It reports the system model as available even while every inference request fails.
   Test health with a real request.
 - **The `pcc` gate is contextual, not just versional.** `fm` refuses PCC outside
-  Terminal.app ("not available in this context") — an agent shell under herdr or pi gets
+  Terminal.app ("not available in this context") — an agent's shell gets
   refused while the same command in Terminal.app proceeds. `fm serve` inherits the
-  context it was launched from, so a proxy in front of a herdr-launched `fm serve`
+  context it was launched from, so a proxy in front of an agent-launched `fm serve`
   cannot reach `pcc` either. Launch the stack from Terminal.app if you want to test it.
 - **27.2 Beta 2 fixed the PCC entitlement check.** On `26B5091g`, `fm respond --model pcc`
   from Terminal.app answers. The history of the Beta 1 fault follows.

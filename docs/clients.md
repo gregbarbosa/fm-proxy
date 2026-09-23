@@ -7,7 +7,7 @@ Pi works against the on-device model for chat. It cannot use tools, because it s
 tool does get real `tool_calls`; see "Forced tool calling works, through a schema" in `docs/upstream-behaviour.md`. What
 stops Pi in practice is project context, not the harness.
 
-Use `pi-minimal`, an alias for `pi -ne -ns -np --no-themes`, and select the `FM`
+Run `pi -ne -ns -np --no-themes`, and select the `FM`
 provider's `system` model. In a directory with no context file it assembles to about
 1188 tokens of the 4096-token window and returns HTTP 200. The lean toolset is only
 about 499 of those.

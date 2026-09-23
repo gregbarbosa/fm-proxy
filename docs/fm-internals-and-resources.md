@@ -101,9 +101,6 @@ log stream --level debug --predicate 'subsystem == "com.apple.fm"'
 # capture exactly what fm POSTs to a provider (no model needed — fake SSE listener)
 fm respond --model-provider http://127.0.0.1:19999 -m <id> 'hi'
 
-# per-turn token ledger for fm chat via local providers
-node tools/usage-tap.js    # then --model-provider lmstudio-tap; ledger ~/.fm/usage-tap.jsonl
-
 # token counts (Apple tokenizer; framed vs raw)
 fm count-tokens -i 'instructions' 'prompt'   # framed incl. chat-template markers
 fm count-tokens --transcript ~/.fm/sessions/<session>.json

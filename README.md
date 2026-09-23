@@ -128,6 +128,9 @@ that a client can branch on the cause.
 | `invalid_request_error` / `context_length_exceeded` | The prompt is larger than the window. | No. Shorten the prompt. |
 | `invalid_request_error` / `model_unavailable` | `pcc` outside Terminal.app. | No. |
 | `invalid_request_error` / `cyclic_schema` | A `response_format` schema refers to itself. | No. |
+| `invalid_request_error` / `json_object_unsupported` | `response_format: {"type": "json_object"}`. `fm serve` supports only `json_schema`. | No. Send a JSON schema. |
+| `invalid_request_error` / `tool_choice_unsupported` | A forced `tool_choice` that the proxy could not translate, such as a function that is not in `tools`. | No. |
+| `server_error` / `generation_parse_failed` | `fm serve` could not parse the arguments that the model generated. | No. |
 | `invalid_request_error` / `provider_rejected` | A `--model-provider` server answered with a 4xx, such as an unknown model. | No. |
 | `invalid_request_error` / `invalid_request` | Any other `400`, such as an unknown model or `n > 1`. | No. |
 | `rate_limit_exceeded` | A transient capacity error. The proxy has already retried it. | Yes, later. |

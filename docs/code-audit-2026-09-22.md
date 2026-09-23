@@ -106,6 +106,8 @@ normaliser, the removed wrappers and token cache, and the five bug fixes.
 The proposed `docs/audit-recipe.md` and `docs/release-history.md` became one file,
 `docs/audit.md`. `CHANGELOG.md` was not added.
 
-The wire baseline changed in one place only: the cyclic-schema error text. `npm test`
+The wire baseline changed in one place only: the cyclic-schema error text. The baseline stub
+never returns an error, so it does not pin B2, B3, or the provider fix. Their integration
+tests do. `npm test`
 passes 155 of 155. Against a live `fm serve` on `26B5091g`, the deviation probe handled 11
 of 11, and `pcc`, forced dispatch on `pcc`, and a streamed `stop` all worked.
