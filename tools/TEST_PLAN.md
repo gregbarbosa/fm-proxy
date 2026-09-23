@@ -78,7 +78,7 @@ absent, usage on both paths, parseable frames, one usage frame, and a real `pi` 
 trip. With `"contextWindow": 4096` in Pi's config it reports 6 passed and 1 failed: Pi
 keeps a fixed 4096-token margin, so it sends `max_completion_tokens: 1`, the proxy
 correctly labels the reply `length`, and Pi hides the turn. Set `contextWindow` to 8192
-and the `pi` case can pass; see `docs/clients.md`.
+and it reports 7 passed (measured 2026-09-23); see `docs/clients.md`.
 
 ## Before you trust a failure
 
