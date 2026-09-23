@@ -85,3 +85,24 @@ These items are missing. Each one is a decision for the owner.
    structural or cheap.
 5. Correct the stale statements, and apply the documentation layout.
 6. Apply the packaging items that the owner accepts.
+
+## Outcome
+
+Done on branch `refactor/oss-quality`, 2026-09-22.
+
+| Item | Commit |
+|---|---|
+| B1, B2, B3 fixed, with tests | `a768a3f` |
+| `fm-proxy.js` split into `src/`; slop removed; a lost `stop` cut in the stream relay fixed | `d57ee30` |
+| Tests split into `test/`; `package.json`; CI on Node 18, 20 and 22 | `2c3407e` |
+| Documentation layout applied; stale statements corrected; a missing chunked-upload test added | `80d32bf` |
+| A provider's wrapped 4xx is no longer retried (found in the live check) | `60840d3` |
+
+The code went from 1323 lines to about 1150, in 12 files. Comment lines went from 373 to
+about 170. Most of the line reduction is comments, which is the cheap kind. The
+structural changes are the module split, one serialisation per request, one `stop`
+normaliser, the removed wrappers and token cache, and the four bug fixes.
+
+The wire baseline changed in one place only: the cyclic-schema error text. `npm test`
+passes 155 of 155. Against a live `fm serve` on `26B5091g`, the deviation probe handled 11
+of 11, and `pcc`, forced dispatch on `pcc`, and a streamed `stop` all worked.
