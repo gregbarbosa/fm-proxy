@@ -672,7 +672,9 @@ async function startStack({ handler, deadUpstream = false, maxRetries = 0, env =
     stdio: ["ignore", "pipe", "pipe"],
   });
   let stderr = "";
+  let stdout = "";
   child.stderr.on("data", (d) => (stderr += d));
+  child.stdout.on("data", (d) => (stdout += d));
   // Wait for the "listening" banner so we don't race the first request.
   await new Promise((resolve, reject) => {
     const to = setTimeout(() => reject(new Error("proxy did not start")), 5000);
@@ -686,6 +688,7 @@ async function startStack({ handler, deadUpstream = false, maxRetries = 0, env =
     proxyPort,
     getLastBody: () => lastBody,
     getStderr: () => stderr,
+    getStdout: () => stdout,
     async stop() {
       child.kill();
       if (upstream) await new Promise((r) => upstream.close(r));
@@ -2365,4 +2368,86 @@ test("streaming: an unusable dispatched reply still streams as content", async (
     if (d && typeof d.content === "string") text += d.content;
   }
   assert.strictEqual(text, "I cannot do that.");
+});
+
+// ── bind address ────────────────────────────────────────────────────────────
+
+// The start banner reports the address the socket is actually bound to.
+test("bind: the proxy listens on loopback only by default", async (t) => {
+  const stack = await startStack();
+  t.after(() => stack.stop());
+  assert.match(stack.getStdout(), /listening on http:\/\/127\.0\.0\.1:/);
+});
+
+test("bind: PROXY_HOST=0.0.0.0 opens the proxy to the network", async (t) => {
+  const stack = await startStack({ env: { PROXY_HOST: "0.0.0.0" } });
+  t.after(() => stack.stop());
+  assert.match(stack.getStdout(), /listening on http:\/\/0\.0\.0\.0:/);
+});
+
+// ── a model that is unavailable in this context is terminal ─────────────────
+
+const PCC_CONTEXT_503 = "Model 'pcc' is unavailable: Private Cloud Compute is not available " +
+  "in this context. Please use the Terminal app.";
+
+test("classifyError: a model unavailable in this context is terminal, not retried", () => {
+  const c = classifyError(PCC_CONTEXT_503, 503);
+  assert.strictEqual(c.type, "invalid_request_error");
+  assert.strictEqual(c.code, "model_unavailable");
+  assert.strictEqual(c.retry, false);
+});
+
+test("classifyError: a bare 503 stays retryable", () => {
+  assert.strictEqual(classifyError("Service Unavailable", 503).retry, true);
+});
+
+test("an unavailable model reaches the client after one upstream request", async (t) => {
+  let hits = 0;
+  const stack = await startStack({ maxRetries: 4, handler: (req, parsed, res) => {
+    hits++;
+    res.writeHead(503, { "content-type": "application/json" });
+    res.end(JSON.stringify({ error: { message: PCC_CONTEXT_503, type: "server_error" } }));
+  } });
+  t.after(() => stack.stop());
+  const r = await postChat(stack, JSON.stringify({ model: "pcc", stream: false,
+    messages: [{ role: "user", content: "hi" }] }));
+  assert.strictEqual(hits, 1);
+  assert.strictEqual(r.status, 503);
+  assert.strictEqual(JSON.parse(r.body).error.code, "model_unavailable");
+});
+
+// ── a dispatched stream carries an upstream error ───────────────────────────
+
+test("streaming dispatch: an upstream error arrives as a typed error frame", async (t) => {
+  const stack = await startStack({ handler: (req, parsed, res) => {
+    res.writeHead(400, { "content-type": "application/json" });
+    res.end(JSON.stringify({ error: { message: "Unknown model 'nope'.", type: "invalid_request_error" } }));
+  } });
+  t.after(() => stack.stop());
+  const body = JSON.parse(FORCED_REQ(true));
+  body.model = "nope";
+  const r = await postChat(stack, JSON.stringify(body));
+  assert.strictEqual(r.status, 400);
+  const frames = r.body.split("\n").filter((l) => l.startsWith("data: ") && !l.includes("[DONE]"))
+    .map((l) => JSON.parse(l.slice(6)));
+  const err = frames.find((f) => f.error);
+  assert.ok(err, "an error frame must reach the client");
+  assert.match(err.error.message, /Unknown model 'nope'/);
+  assert.strictEqual(err.error.type, "invalid_request_error");
+  assert.ok(!frames.some((f) => f.choices?.[0]?.finish_reason), "no finish_reason on an error");
+});
+
+test("streaming dispatch: the synthesised frames carry the request's model", async (t) => {
+  const stack = await startStack({ handler: (req, parsed, res) => {
+    res.writeHead(200, { "content-type": "application/json" });
+    res.end(JSON.stringify({ id: "x", object: "chat.completion",
+      choices: [{ index: 0, message: { role: "assistant", content: '{"get_weather":{"city":"Paris"}}' },
+        finish_reason: "stop" }], usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 } }));
+  } });
+  t.after(() => stack.stop());
+  const body = JSON.parse(FORCED_REQ(true));
+  body.model = "pcc";
+  const r = await postChat(stack, JSON.stringify(body));
+  const first = JSON.parse(r.body.split("\n").find((l) => l.startsWith("data: ")).slice(6));
+  assert.strictEqual(first.model, "pcc");
 });

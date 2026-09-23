@@ -11,6 +11,9 @@ const http = require("http");
 const { execFileSync } = require("child_process");
 const FM_PORT = Number(process.env.FM_PORT) || 1976;
 const PROXY_PORT = Number(process.env.PROXY_PORT) || 1977;
+// Loopback by default: the proxy ignores the API key and strips the cross-site headers
+// that fm serve uses to refuse remote callers. Set PROXY_HOST=0.0.0.0 to open it.
+const PROXY_HOST = process.env.PROXY_HOST || "127.0.0.1";
 // Matches fm-launch.sh's --fm-bin/FM_BIN. Point it at a path that does not exist to
 // force the heuristic token count, which is what makes a test run deterministic.
 const FM_BIN = process.env.FM_BIN || "/usr/bin/fm";
@@ -620,6 +623,12 @@ function classifyError(msg, status) {
   if (m.includes("'json_object' is not supported"))
     return { type: "invalid_request_error", code: "json_object_unsupported", retry: false,
              label: "JSON_OBJECT MODE UNSUPPORTED" };
+  // `pcc` outside Terminal.app answers 503 "... is unavailable: Private Cloud Compute is
+  // not available in this context." The context is fixed for the life of fm serve, so a
+  // retry re-fails. A bare 503 without this wording stays retryable.
+  if (m.includes("not available in this context"))
+    return { type: "invalid_request_error", code: "model_unavailable", retry: false,
+             label: "MODEL UNAVAILABLE IN THIS CONTEXT" };
   // A genuine rate limit. Do NOT reclassify this on the request's shape: forced
   // tool_choice has its own message (handled above), so any extra reclassification here
   // would only mislabel a real rate limit as a permanent client error and skip the
@@ -1091,17 +1100,29 @@ function relayStreamingChat({ res, proxyRes, diag, commit, isCommitted, fail, is
 // only for a dispatched request, where the reply had to be parsed whole before any
 // `tool_calls` could be named.
 const ARG_CHUNK = 64;
-function emitSynthesisedStream(res, obj, status, upstreamHeaders) {
+function writeSseHead(res, status) {
   res.writeHead(status, {
     ...CORS_HEADERS,
     "content-type": "text/event-stream; charset=utf-8",
     "cache-control": "no-cache, no-transform",
     connection: "keep-alive",
   });
+}
+
+// A dispatched request that failed upstream. The error is already typed.
+function emitErrorStream(res, error, status) {
+  writeSseHead(res, status);
+  res.write(`data: ${JSON.stringify({ error })}\n\n`);
+  res.write("data: [DONE]\n\n");
+  res.end();
+}
+
+function emitSynthesisedStream(res, obj, status, model) {
+  writeSseHead(res, status);
   const ch = obj.choices && obj.choices[0] ? obj.choices[0] : {};
   const meta = { id: obj.id || "chatcmpl-proxy", object: "chat.completion.chunk",
                  created: obj.created || Math.floor(Date.now() / 1000),
-                 model: obj.model || "system" };
+                 model: obj.model || model };
   const send = (delta, extra) => res.write(`data: ${JSON.stringify({ ...meta,
     choices: [{ index: 0, delta, ...(extra || {}) }] })}\n\n`);
 
@@ -1215,7 +1236,9 @@ proxyRes.on("end", () => {
   // stream here. Arguments go out in pieces, as OpenAI does, so a client that
   // concatenates `function.arguments` across deltas gets valid JSON.
   if (dispatchStreamOut && obj) {
-    emitSynthesisedStream(res, obj, outStatus, proxyRes.headers);
+    const model = (parsedReq && parsedReq.model) || "system";
+    if (isErrorPayload(obj)) emitErrorStream(res, obj.error, outStatus);
+    else emitSynthesisedStream(res, obj, outStatus, model);
     return;
   }
   relayHead(res, outStatus, proxyRes.headers, Buffer.byteLength(out));
@@ -1315,8 +1338,8 @@ const server = http.createServer((req, res) => {
 
 // Only start listening when run directly; importing for tests must not bind.
 if (require.main === module) {
-  server.listen(PROXY_PORT, () => {
-    console.log(`fm-proxy listening on http://127.0.0.1:${PROXY_PORT}`);
+  server.listen(PROXY_PORT, PROXY_HOST, () => {
+    console.log(`fm-proxy listening on http://${server.address().address}:${PROXY_PORT}`);
     console.log(`  proxying to http://127.0.0.1:${FM_PORT}`);
     console.log(`  simplifies tool schemas to flat format for fm serve compatibility`);
   });
