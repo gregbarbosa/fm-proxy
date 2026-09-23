@@ -225,9 +225,22 @@ test("classifyError types json_object so clients need not match Apple's prose", 
   assert.strictEqual(c.retry, false);
 });
 
-test("reasoning_effort is dropped: it can never succeed with pcc gone", () => {
-  const { body } = rewriteBody(JSON.stringify({
-    model: "system", messages: [{ role: "user", content: "hi" }], reasoning_effort: "low",
-  }));
-  assert.strictEqual("reasoning_effort" in JSON.parse(body), false);
+// fm serve 400s reasoning_effort on `system`. On `pcc` it is real: measured on 27.2
+// Beta 2, low and high raised completion tokens from 11 to 121 and 225.
+test("reasoning_effort is dropped for system, and for a request with no model", () => {
+  for (const model of ["system", undefined]) {
+    const { body } = rewriteBody(JSON.stringify({
+      model, messages: [{ role: "user", content: "hi" }], reasoning_effort: "low",
+    }));
+    assert.strictEqual("reasoning_effort" in JSON.parse(body), false, String(model));
+  }
+});
+
+test("reasoning_effort is forwarded to pcc and to provider models", () => {
+  for (const model of ["pcc", "qwen3.5-9b"]) {
+    const { body } = rewriteBody(JSON.stringify({
+      model, messages: [{ role: "user", content: "hi" }], reasoning_effort: "high",
+    }));
+    assert.strictEqual(JSON.parse(body).reasoning_effort, "high", model);
+  }
 });

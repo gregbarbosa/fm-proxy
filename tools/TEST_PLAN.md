@@ -55,7 +55,8 @@ a diff:
   `response_format`, at every depth
 - `stop` is removed from the forwarded body, on both the streaming and the
   non-streaming path, and applied by the proxy instead
-- `reasoning_effort` is removed from the forwarded body
+- `reasoning_effort` is removed from a `system` request. It is forwarded to `pcc` and to
+  provider models
 - a **forced** `tool_choice` is translated: no `tools` and no `tool_choice` reach fm
   serve, and a `response_format` dispatch schema goes instead
 - an **auto** `tool_choice` is untouched and still forwards `tools` natively

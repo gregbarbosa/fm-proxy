@@ -20,8 +20,8 @@ function rewriteRequest(body) {
   // fm serve 400s on `stop`. The relays apply it to the reply instead.
   const stopSequences = parsed.stop;
   delete parsed.stop;
-  // fm serve 400s on `reasoning_effort` for `system`, and it has no effect there.
-  delete parsed.reasoning_effort;
+  // fm serve 400s on `reasoning_effort` for `system`. `pcc` and provider models use it.
+  if (!parsed.model || parsed.model === "system") delete parsed.reasoning_effort;
 
   // Before the tool rewrite: a dispatched request sends no tools at all.
   const dispatch = buildToolDispatch(parsed);

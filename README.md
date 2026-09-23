@@ -109,6 +109,7 @@ hold.
 | Ignores `max_tokens` | Maps it to `max_completion_tokens`, and reports `length` when the reply reached the cap |
 | Rejects `stop` | Applies `stop` to the reply itself |
 | Rejects the `developer` role | Sends it as `system` |
+| Rejects `reasoning_effort` on `system` | Removes it for `system`. Forwards it to `pcc`, where it adds hidden reasoning tokens. |
 | Rejects a `type` array such as `["string","null"]` | Keeps the first non-null type |
 | Rejects a `$defs` schema that lacks Apple's dialect keys | Inlines every `$ref` and removes `$defs` |
 | Can hang on a cyclic `$defs` schema | Rejects it with `400 cyclic_schema` |

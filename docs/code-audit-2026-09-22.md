@@ -106,6 +106,9 @@ normaliser, the removed wrappers and token cache, and the five bug fixes.
 The proposed `docs/audit-recipe.md` and `docs/release-history.md` became one file,
 `docs/audit.md`. `CHANGELOG.md` was not added.
 
+`reasoning_effort` was measured on `pcc` after the audit. It changes the output, so the
+proxy now forwards it to every model except `system`.
+
 The wire baseline changed in one place only: the cyclic-schema error text. The baseline stub
 never returns an error, so it does not pin B2, B3, or the provider fix. Their integration
 tests do. `npm test`

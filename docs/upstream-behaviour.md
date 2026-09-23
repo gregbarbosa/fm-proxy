@@ -60,7 +60,7 @@ Measured 2026-09-22 with `fm serve` launched from Terminal.app. The proxy needs 
 | Forced `tool_choice`, raw | `200`, but the model ignores it and answers in prose |
 | Forced `tool_choice`, via proxy | A real `tool_call` with valid arguments |
 | `n > 1` | `400`, as on `system` |
-| `reasoning_effort` | Accepted. The proxy removes it anyway. |
+| `reasoning_effort` | Used. `low`, `medium`, and `high` are accepted; any other value 400s. The reasoning is hidden: `content` does not change and `reasoning_tokens` reads 0, but `completion_tokens` counts it. One prompt, twice each: none 11 tokens in 0.7 s, `low` 121 in 1.4 s, `high` 225 in 2.1 s. The proxy forwards it. On `system`, `fm serve` 400s the field, so the proxy removes it there. |
 
 Caution: every `pcc` request uses the account's Private Cloud Compute quota. Keep probes
 few, and check the `quota` object in `/health` before a long run.
