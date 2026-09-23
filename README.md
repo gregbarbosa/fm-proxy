@@ -116,6 +116,7 @@ hold.
 | Rejects a tool with no `description` | Sends an empty description |
 | Rejects a forced `tool_choice` | Translates it into structured output |
 | Refuses requests with `Origin` or `Referer` headers | Removes them, so browser clients work |
+| Refuses a body sent as `text/plain`, a form, or multipart | Sends the body as `application/json` |
 | Leaks template markers into `content` | Removes them if you set `FM_STRIP_TEMPLATE_MARKERS=1` |
 
 ## Errors
@@ -133,6 +134,7 @@ that a client can branch on the cause.
 | `invalid_request_error` / `tool_choice_unsupported` | A forced `tool_choice` that the proxy could not translate, such as a function that is not in `tools`. | No. |
 | `server_error` / `generation_parse_failed` | `fm serve` could not parse the arguments that the model generated. | No. |
 | `invalid_request_error` / `provider_rejected` | A `--model-provider` server answered with a 4xx, such as an unknown model. | No. |
+| `invalid_request_error` / `cross_site_refused` | `fm serve` refused the request as cross-site. The proxy removes the usual causes, so report this as a bug. | No. |
 | `invalid_request_error` / `invalid_request` | Any other `400`, such as an unknown model or `n > 1`. | No. |
 | `rate_limit_exceeded` | A transient capacity error. The proxy has already retried it. | Yes, later. |
 | `server_error` / `upstream_unreachable` | `fm serve` is not running. | After you start it. |

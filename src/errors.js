@@ -43,6 +43,9 @@ function classifyError(msg, status) {
              label: `PROVIDER REJECTED (HTTP ${provider[1]})` };
   if (m.includes("languagemodelerror") || m.includes("error -1") || m.includes("rate limit") || m.includes("rate_limit"))
     return { type: "rate_limit_exceeded", code: -1, retry: true, label: "RATE-LIMIT" };
+  // fm serve's cross-site guard. The same request re-fails.
+  if (status === 403)
+    return { type: "invalid_request_error", code: "cross_site_refused", retry: false, label: "CROSS-SITE REFUSED" };
   // Any other 400 is a request-shape rejection, such as an unknown model. The branches
   // above keep their own meaning on any status.
   if (status === 400)

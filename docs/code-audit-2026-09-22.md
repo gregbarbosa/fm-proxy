@@ -107,7 +107,9 @@ The proposed `docs/audit-recipe.md` and `docs/release-history.md` became one fil
 `docs/audit.md`. `CHANGELOG.md` was not added.
 
 `reasoning_effort` was measured on `pcc` after the audit. It changes the output, so the
-proxy now forwards it to every model except `system`.
+proxy now forwards it to every model except `system`. The live check for it found one more
+bug: a body sent as `text/plain` got a 403 from `fm serve`, and the proxy retried the 403
+for 15 s. Both are fixed.
 
 The wire baseline changed in one place only: the cyclic-schema error text. The baseline stub
 never returns an error, so it does not pin B2, B3, or the provider fix. Their integration

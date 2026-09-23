@@ -505,3 +505,9 @@ test("classifyError: a provider's wrapped 429 and 5xx stay retryable", () => {
   assert.strictEqual(classifyError("HTTP error with status code 429: slow down", 500).retry, true);
   assert.strictEqual(classifyError("HTTP error with status code 502: bad gateway", 500).retry, true);
 });
+
+test("classifyError: fm serve's cross-site 403 is terminal", () => {
+  const c = classifyError("Cross-site requests are not allowed.", 403);
+  assert.strictEqual(c.code, "cross_site_refused");
+  assert.strictEqual(c.retry, false);
+});

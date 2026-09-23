@@ -372,3 +372,21 @@ test("a chunked upload reaches fm serve with Content-Length and no Transfer-Enco
   assert.strictEqual(Number(seen.cl), Buffer.byteLength(JSON.stringify(seen.parsed)));
   assert.strictEqual(seen.parsed.messages[0].content, "hi");
 });
+
+// fm serve answers 403 "Cross-site requests are not allowed" to text/plain, form and
+// multipart bodies. Node's fetch sends text/plain for a string body with no header.
+test("a JSON body sent as text/plain reaches fm serve as application/json", async (t) => {
+  let seen = null;
+  const stack = await startStack({ handler: (req, parsed, res) => {
+    seen = req.headers["content-type"];
+    res.writeHead(200, { "content-type": "application/json" });
+    res.end(JSON.stringify({ choices: [{ index: 0, message: { role: "assistant", content: "ok" },
+      finish_reason: "stop" }], usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 } }));
+  } });
+  t.after(() => stack.stop());
+  const r = await request(stack.proxyPort, { method: "POST", path: "/v1/chat/completions",
+    headers: { "content-type": "text/plain;charset=UTF-8" } },
+    JSON.stringify({ model: "system", stream: false, messages: [{ role: "user", content: "hi" }] }));
+  assert.strictEqual(r.status, 200);
+  assert.strictEqual(seen, "application/json");
+});

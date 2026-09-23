@@ -89,6 +89,9 @@ function prepareUpstream(req, body) {
 
   const upstreamBody = parsed ? JSON.stringify(parsed) : body;
   const headers = { ...req.headers, "content-length": Buffer.byteLength(upstreamBody) };
+  // fm serve refuses the CORS "simple" types (text/plain, form, multipart) as cross-site.
+  // The body is JSON the proxy wrote itself, so say so.
+  if (parsed) headers["content-type"] = "application/json";
   // The body is buffered, so Content-Length is exact. Content-Length together with
   // Transfer-Encoding is illegal framing.
   delete headers["transfer-encoding"];
