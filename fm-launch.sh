@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
 # fm-launch.sh — one command to bring up the whole stack:
 #
-#   Apple `fm serve` (the entitled engine)  +  fm-proxy.js (OpenAI-compat shim)
+#   Apple `fm serve`  +  fm-proxy.js (the OpenAI-compatible proxy)
 #
 # fm serve runs in the FOREGROUND (this script blocks on it) so Ctrl-C reaches it
-# directly. Beta 7 removed Private Cloud Compute, so the old Terminal.app foreground
-# requirement is gone: the `system` model works in any terminal, backgrounded or not.
+# directly. The `system` model works from any terminal. The `pcc` model works only when
+# this script runs in Terminal.app, because fm serve inherits the launch context.
 #
 # The proxy is a backgrounded child. Traps on INT/TERM/HUP/EXIT tear it down so it
 # can't orphan (Ctrl-C, closed terminal, or fm serve dying all clean up the proxy).

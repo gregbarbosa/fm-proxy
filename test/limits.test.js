@@ -1,0 +1,148 @@
+const { test } = require("node:test");
+const assert = require("node:assert");
+const { startStack, request, postChat } = require("./helpers");
+
+// ── max_tokens, and the truncation mislabel ─────────────────────────────────
+// fm serve SILENTLY IGNORES `max_tokens` — the field almost every OpenAI SDK sends —
+// and truncates only on `max_completion_tokens`. Verified live: max_tokens:10 on a
+// "count to 100" prompt returned 391 completion tokens. Unmapped, a client that asks
+// for a short reply gets an unbounded one.
+test("max_tokens is mapped to max_completion_tokens upstream", async () => {
+  const stack = await startStack();
+  try {
+    await request(stack.proxyPort,
+      { method: "POST", path: "/v1/chat/completions", headers: { "content-type": "application/json" } },
+      JSON.stringify({ model: "system", stream: false, max_tokens: 10, messages: [{ role: "user", content: "hi" }] }));
+    const got = stack.getLastBody();
+    assert.strictEqual(got.max_completion_tokens, 10, "cap must reach fm serve on the field it honours");
+    assert.strictEqual(got.max_tokens, undefined, "the ignored field must not also be forwarded");
+  } finally { await stack.stop(); }
+});
+
+test("an explicit max_completion_tokens is not overridden by max_tokens", async () => {
+  const stack = await startStack();
+  try {
+    await request(stack.proxyPort,
+      { method: "POST", path: "/v1/chat/completions", headers: { "content-type": "application/json" } },
+      JSON.stringify({ model: "system", stream: false, max_tokens: 99, max_completion_tokens: 8, messages: [{ role: "user", content: "hi" }] }));
+    assert.strictEqual(stack.getLastBody().max_completion_tokens, 8);
+  } finally { await stack.stop(); }
+});
+
+// fm serve says finish_reason:"stop" even when it stopped at the cap, so a client cannot
+// tell a complete answer from a truncated one. The cap is approximate (fm serve
+// overshoots), so the check is >= rather than ==.
+test("a completion that reached the cap is re-labelled finish_reason:length", async () => {
+  const stack = await startStack({
+    handler: (req, parsed, res) => {
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify({
+        id: "chatcmpl-x", object: "chat.completion", model: "system",
+        choices: [{ index: 0, message: { role: "assistant", content: "1, 2, 3" }, finish_reason: "stop" }],
+        usage: { prompt_tokens: 20, completion_tokens: 10, total_tokens: 30 },
+      }));
+    },
+  });
+  try {
+    const res = await request(stack.proxyPort,
+      { method: "POST", path: "/v1/chat/completions", headers: { "content-type": "application/json" } },
+      JSON.stringify({ model: "system", stream: false, max_tokens: 10, messages: [{ role: "user", content: "hi" }] }));
+    assert.strictEqual(JSON.parse(res.body).choices[0].finish_reason, "length");
+  } finally { await stack.stop(); }
+});
+
+test("a completion under the cap keeps finish_reason:stop", async () => {
+  const stack = await startStack({
+    handler: (req, parsed, res) => {
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify({
+        id: "chatcmpl-x", object: "chat.completion", model: "system",
+        choices: [{ index: 0, message: { role: "assistant", content: "hi" }, finish_reason: "stop" }],
+        usage: { prompt_tokens: 20, completion_tokens: 2, total_tokens: 22 },
+      }));
+    },
+  });
+  try {
+    const res = await request(stack.proxyPort,
+      { method: "POST", path: "/v1/chat/completions", headers: { "content-type": "application/json" } },
+      JSON.stringify({ model: "system", stream: false, max_tokens: 10, messages: [{ role: "user", content: "hi" }] }));
+    assert.strictEqual(JSON.parse(res.body).choices[0].finish_reason, "stop");
+  } finally { await stack.stop(); }
+});
+
+test("no cap in the request leaves finish_reason untouched", async () => {
+  const stack = await startStack();
+  try {
+    const res = await request(stack.proxyPort,
+      { method: "POST", path: "/v1/chat/completions", headers: { "content-type": "application/json" } },
+      JSON.stringify({ model: "system", stream: false, messages: [{ role: "user", content: "hi" }] }));
+    assert.strictEqual(JSON.parse(res.body).choices[0].finish_reason, "stop");
+  } finally { await stack.stop(); }
+});
+
+// ── Overflow message must be recognisable to clients ─────────────────────────
+// Clients auto-recover from a context overflow (compact-and-retry) by matching the
+// error TEXT, not the code — Pi's patterns are "context length exceeded", "exceeds the
+// context window", "too many tokens", "token limit exceeded". fm serve says "The
+// session's transcript exceeded the model's context size", which matches none of them,
+// so a client that could have compacted and retried instead just gave up. Surface a
+// message carrying the canonical phrase, keeping fm serve's own wording for diagnosis.
+const OVERFLOW_UP = "The session's transcript exceeded the model's context size.";
+
+test("non-streaming overflow surfaces a message clients can match on", async () => {
+  const stack = await startStack({
+    handler: (req, parsed, res) => {
+      res.writeHead(500, { "content-type": "application/json" });
+      res.end(JSON.stringify({ error: { type: "server_error", code: "500", message: OVERFLOW_UP } }));
+    },
+  });
+  try {
+    const res = await request(stack.proxyPort,
+      { method: "POST", path: "/v1/chat/completions", headers: { "content-type": "application/json" } },
+      JSON.stringify({ model: "system", stream: false, messages: [{ role: "user", content: "hi" }] }));
+    const body = JSON.parse(res.body);
+    assert.strictEqual(body.error.code, "context_length_exceeded");
+    assert.match(body.error.message, /context length exceeded/i);
+    // fm serve's own sentence is kept so the upstream cause stays greppable.
+    assert.match(body.error.message, /transcript exceeded the model's context size/);
+  } finally { await stack.stop(); }
+});
+
+test("streaming overflow surfaces the same matchable message", async () => {
+  const stack = await startStack({
+    handler: (req, parsed, res) => {
+      res.writeHead(200, { "content-type": "text/event-stream" });
+      res.write(`data: ${JSON.stringify({ error: { type: "server_error", code: "500", message: OVERFLOW_UP } })}\n\n`);
+      res.end();
+    },
+  });
+  try {
+    const res = await request(stack.proxyPort,
+      { method: "POST", path: "/v1/chat/completions", headers: { "content-type": "application/json" } },
+      JSON.stringify({ model: "system", stream: true, messages: [{ role: "user", content: "hi" }] }));
+    assert.match(res.body, /context length exceeded/i);
+    assert.match(res.body, /"code":"context_length_exceeded"/);
+  } finally { await stack.stop(); }
+});
+
+test("streaming: a cap and a stop sequence in the same chunk both apply", async (t) => {
+  const stack = await startStack({ handler: (req, parsed, res) => {
+    res.writeHead(200, { "content-type": "text/event-stream" });
+    res.write(`data: ${JSON.stringify({ id: "x", object: "chat.completion.chunk", model: "system",
+      choices: [{ index: 0, delta: { content: "hello STOP world" }, finish_reason: "stop" }] })}\n\n`);
+    res.write(`data: ${JSON.stringify({ id: "x", object: "chat.completion.chunk", model: "system",
+      choices: [], usage: { prompt_tokens: 5, completion_tokens: 3, total_tokens: 8 } })}\n\n`);
+    res.write("data: [DONE]\n\n");
+    res.end();
+  } });
+  t.after(() => stack.stop());
+  const r = await postChat(stack, JSON.stringify({ model: "system", stream: true, max_tokens: 50,
+    stop: "STOP", messages: [{ role: "user", content: "hi" }] }));
+  let text = "";
+  for (const line of r.body.split("\n")) {
+    if (!line.startsWith("data: ") || line.includes("[DONE]")) continue;
+    const d = JSON.parse(line.slice(6)).choices?.[0]?.delta;
+    if (d && typeof d.content === "string") text += d.content;
+  }
+  assert.strictEqual(text, "hello ");
+});
