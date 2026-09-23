@@ -75,9 +75,10 @@ still handles it. Expect **11 of 11 handled**.
 The maintainer also runs `tools/harness-check.sh`, which is not in the repository because
 it drives `pi`. It asserts what a real client depends on: a JSON reply when `stream` is
 absent, usage on both paths, parseable frames, one usage frame, and a real `pi` round
-trip. It reports 6 passed and 1 failed. The `pi` case fails because `pi` sends
-`max_completion_tokens: 1`, the proxy correctly labels the reply `length`, and `pi` hides
-a turn it believes was truncated.
+trip. With `"contextWindow": 4096` in Pi's config it reports 6 passed and 1 failed: Pi
+keeps a fixed 4096-token margin, so it sends `max_completion_tokens: 1`, the proxy
+correctly labels the reply `length`, and Pi hides the turn. Set `contextWindow` to 8192
+and the `pi` case can pass; see `docs/clients.md`.
 
 ## Before you trust a failure
 
