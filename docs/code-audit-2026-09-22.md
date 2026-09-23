@@ -101,7 +101,10 @@ Done on branch `refactor/oss-quality`, 2026-09-22.
 The code went from 1323 lines to about 1150, in 12 files. Comment lines went from 373 to
 about 170. Most of the line reduction is comments, which is the cheap kind. The
 structural changes are the module split, one serialisation per request, one `stop`
-normaliser, the removed wrappers and token cache, and the four bug fixes.
+normaliser, the removed wrappers and token cache, and the five bug fixes.
+
+The proposed `docs/audit-recipe.md` and `docs/release-history.md` became one file,
+`docs/audit.md`. `CHANGELOG.md` was not added.
 
 The wire baseline changed in one place only: the cyclic-schema error text. `npm test`
 passes 155 of 155. Against a live `fm serve` on `26B5091g`, the deviation probe handled 11
