@@ -31,6 +31,11 @@ function classifyError(msg, status) {
   if (m.includes("not available in this context"))
     return { type: "invalid_request_error", code: "model_unavailable", retry: false,
              label: "MODEL UNAVAILABLE IN THIS CONTEXT" };
+  // The on-device model service answers nothing in this state, for under a minute to
+  // about 8 minutes. A retry inside the 15 s ladder only delays the error.
+  if (m.includes("sensitivecontentanalysisml error 15"))
+    return { type: "server_error", code: "model_service_unavailable", retry: false,
+             label: "MODEL SERVICE UNAVAILABLE (error 15)" };
   // With --model-provider, fm serve wraps the provider's own error in a 500:
   // "HTTP error with status code 400: ...". A 4xx other than 429 re-fails on a retry.
   const provider = m.match(/http error with status code (\d{3})/);

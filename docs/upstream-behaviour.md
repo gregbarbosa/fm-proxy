@@ -129,6 +129,9 @@ Caution: a forced call returns exactly one tool call, and it replaces a caller's
   machine still settling after an OS update, and it clears itself: on the RC it cleared
   in about 20 to 30 minutes with no intervention. An experiment ruled out both the cyclic
   hang and an `fm serve` restart as causes. Wait before you investigate.
+  On 26B123 it cleared in under a minute after a stack start, and in about 8 minutes
+  after repeated runaway generations. A 15 s retry does not help, so the proxy returns
+  it at once as `server_error` / `model_service_unavailable`.
 - **After a restart, the first request takes about 25 seconds** while the model reloads.
 
 ## Vision: how the on-device model encodes images

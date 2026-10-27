@@ -10,7 +10,7 @@ Three layers. Run them in order. Each catches what the layer above cannot.
 
 ## Layer 1 — unit and integration
 
-`npm test`. Expect **164 pass, 0 fail**. Without `fm`, as on a CI runner, expect 162 pass
+`npm test`. Expect **166 pass, 0 fail**. Without `fm`, as on a CI runner, expect 164 pass
 and 2 skipped.
 
 A skipped test means the `fm` CLI is unavailable. Check the licence with `fm license

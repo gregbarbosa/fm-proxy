@@ -139,6 +139,7 @@ that a client can branch on the cause. A non-streaming `invalid_request_error` t
 | `invalid_request_error` / `provider_rejected` | A `--model-provider` server answered with a 4xx, such as an unknown model. | No. |
 | `invalid_request_error` / `cross_site_refused` | `fm serve` refused the request as cross-site. The proxy removes the usual causes, so report this as a bug. | No. |
 | `invalid_request_error` / `invalid_request` | Any other `400`, such as an unknown model or `n > 1`. | No. |
+| `server_error` / `model_service_unavailable` | The on-device model service is in the `SensitiveContentAnalysisML error 15` state. It clears itself, in less than a minute to about 8 minutes. | Yes, after some minutes. The proxy does not retry it. |
 | `rate_limit_exceeded` | A transient capacity error. The proxy has already retried it. | Yes, later. |
 | `server_error` / `upstream_unreachable` | `fm serve` is not running. | After you start it. |
 

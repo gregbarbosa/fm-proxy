@@ -467,3 +467,12 @@ test("classifyError: fm serve's cross-site 403 is terminal", () => {
   assert.strictEqual(c.code, "cross_site_refused");
   assert.strictEqual(c.retry, false);
 });
+
+// The model service answers nothing for minutes at a time in this state; a 15 s retry
+// ladder only delays the error. Measured on 26B123: from under a minute to about 8.
+test("classifyError: SensitiveContentAnalysisML error 15 is terminal", () => {
+  const c = classifyError("The operation couldn’t be completed. (com.apple.SensitiveContentAnalysisML error 15.)", 500);
+  assert.strictEqual(c.type, "server_error");
+  assert.strictEqual(c.code, "model_service_unavailable");
+  assert.strictEqual(c.retry, false);
+});

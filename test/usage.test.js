@@ -242,3 +242,26 @@ test("streaming: a length cap still carries finish_reason on the usage chunk", a
     assert.ok(/"finish_reason":"length"/.test(res.body), `no length label:\n${res.body}`);
   } finally { await stack.stop(); }
 });
+
+test("model service error 15 hits upstream exactly once, even with retries enabled", async () => {
+  let hits = 0;
+  const stack = await startStack({
+    maxRetries: 4,
+    handler: (req, parsed, res) => {
+      hits++;
+      res.writeHead(500, { "content-type": "application/json" });
+      res.end(JSON.stringify({
+        error: { type: "server_error", code: "500",
+                 message: "The operation couldn’t be completed. (com.apple.SensitiveContentAnalysisML error 15.)" },
+      }));
+    },
+  });
+  try {
+    const res = await request(stack.proxyPort,
+      { method: "POST", path: "/v1/chat/completions", headers: { "content-type": "application/json" } },
+      JSON.stringify({ model: "system", stream: false, messages: [{ role: "user", content: "hi" }] }));
+    assert.strictEqual(hits, 1, `retried error 15 ${hits} times`);
+    assert.strictEqual(res.status, 500);
+    assert.ok(res.body.includes('"model_service_unavailable"'), `body=${res.body}`);
+  } finally { await stack.stop(); }
+});
