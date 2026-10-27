@@ -10,7 +10,6 @@ module.exports = {
   // Used only for the token-count fallback. A path that does not exist forces the
   // heuristic, which makes a test run deterministic.
   FM_BIN: env.FM_BIN || "/usr/bin/fm",
-  STRIP_MARKERS: env.FM_STRIP_TEMPLATE_MARKERS === "1",
   CORS_ORIGIN: env.CORS_ORIGIN || "*",
   MAX_RETRIES: Number(env.FM_MAX_RETRIES ?? 4),
   RETRY_BASE_MS: Number(env.FM_RETRY_BASE_MS ?? 1000),

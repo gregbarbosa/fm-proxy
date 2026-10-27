@@ -2,12 +2,11 @@
 //
 // The client's response head is held back until the first frame that carries meaning,
 // so a failure before that point can still be retried without the client seeing it.
-// The relay also applies `stop`, strips markers when asked, turns a guardrail abort into
-// finish_reason "content_filter", and ends with its own usage chunk and [DONE].
-const { STRIP_MARKERS } = require("./config");
+// The relay also applies `stop`, turns a guardrail abort into finish_reason
+// "content_filter", and ends with its own usage chunk and [DONE].
 const { classifyError, isErrorPayload, errorFrame } = require("./errors");
 const { countCompletionTokens } = require("./tokens");
-const { stripTemplateMarkers, stopList, truncateAtStop } = require("./text");
+const { stopList, truncateAtStop } = require("./text");
 const { diag, logToks } = require("./http");
 
 // A raw line, outside `data:`, that carries one of fm serve's errors.
@@ -53,7 +52,8 @@ function relayStreamingChat({ res, proxyRes, gate, ctx, reqStart }) {
   let surfacedError = false;
   let abortFinishReason = null;
   // Under a cap, upstream sends finish_reason before usage, so "stop" versus "length"
-  // is decided only at the end. Holding it keeps exactly one finish_reason in the stream.
+  // is decided only at the end. Under `stop`, held-back text goes out at the end. Holding
+  // the finish in both cases keeps exactly one finish_reason, after all the content.
   let heldFinish = null;
   // An opening {"role":"assistant"} frame can precede an error. Committing on it would
   // make that error unretryable, so hold such frames until a meaningful one arrives.
@@ -92,7 +92,7 @@ function relayStreamingChat({ res, proxyRes, gate, ctx, reqStart }) {
             let rewrite = false;
             if (ch0 && ch0.finish_reason) {
               sawFinish = true; meaningful = true;
-              if (cappedAt != null) {
+              if (cappedAt != null || stops.length) {
                 heldFinish = ch0.finish_reason;
                 delete ch0.finish_reason;
                 rewrite = true;
@@ -102,7 +102,6 @@ function relayStreamingChat({ res, proxyRes, gate, ctx, reqStart }) {
             if (delta && typeof delta.content === "string") {
               if (tFirstToken == null) tFirstToken = Date.now();
               const original = delta.content;
-              if (STRIP_MARKERS) delta.content = stripTemplateMarkers(delta.content);
               if (stops.length) delta.content = applyStop(delta.content);
               if (delta.content !== original) rewrite = true;
               completionText += delta.content;
@@ -204,8 +203,10 @@ function relayStreamingChat({ res, proxyRes, gate, ctx, reqStart }) {
       tFirstToken != null ? now - tFirstToken : now - reqStart,
       tFirstToken != null ? tFirstToken - reqStart : null);
 
-    // fm serve reports "stop" when it stopped at the cap. An abort wins over the cap.
+    // fm serve reports "stop" when it stopped at the cap. An abort wins over the cap, and
+    // so does a tool call: a complete call is not truncated text.
     const cappedFinish = cappedAt != null && !abortFinishReason &&
+      (heldFinish == null || heldFinish === "stop") &&
       Number(usage.completion_tokens) >= Number(cappedAt) ? "length" : null;
     const finish = abortFinishReason || cappedFinish || heldFinish;
     // A usage chunk has `choices: []`. A choice with finish_reason null would overwrite

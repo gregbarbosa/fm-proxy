@@ -4,17 +4,22 @@
 // patternProperties, $ref and $defs, and a `type` array. Nested objects and arrays
 // decode natively at any depth.
 //
-// response_format: fm serve decodes nested objects, but a `$defs` entry needs Apple's
-// own dialect keys. The proxy inlines every `$ref` so the dialect is never needed, and
-// injects it only for a schema that cannot be inlined.
+// response_format: fm serve decodes nested objects, but it 400s on a `$defs` entry
+// without a `title`, and on a titled primitive without an `enum`. The proxy inlines
+// every `$ref` and removes `title` from primitives.
+//
+// Both `$defs` and draft-07 `definitions` are resolved. zod-to-json-schema emits the
+// second by default.
 
-const DEFS_REF_PREFIX = "#/$defs/";
+const REF_TABLES = ["$defs", "definitions"];
 
 // Keys that fm serve rejects or ignores on a primitive. The ignored ones still cost
-// prompt tokens.
+// prompt tokens. `description` stays: the model reads it, and a format hint such as
+// "YYYY-MM-DD" changes the arguments it writes. `title` goes: a titled string without
+// an `enum` is a 400.
 const STRIP_KEYS = new Set([
   "anyOf", "allOf", "oneOf", "if", "then", "else", "not",
-  "$defs", "definitions", "$ref", "patternProperties", "description",
+  "$defs", "definitions", "$ref", "patternProperties",
   "title", "examples", "default", "$schema", "$id", "$comment", "readOnly", "writeOnly",
 ]);
 
@@ -86,7 +91,7 @@ function fixToolSchema(schema) {
   if (!schema || typeof schema !== "object") return result;
 
   // Inline first. simplifyProperty strips `$ref`, which would turn a named type into `{}`.
-  if (schema.$defs) schema = inlineDefs(schema) || schema;
+  if (hasDefs(schema)) schema = inlineDefs(schema) || schema;
 
   for (const [name, prop] of Object.entries(schema.properties || {})) {
     result.properties[name] = simplifyProperty(prop);
@@ -97,117 +102,122 @@ function fixToolSchema(schema) {
   return result;
 }
 
-function defName(ref, defs) {
-  if (typeof ref !== "string" || !ref.startsWith(DEFS_REF_PREFIX)) return null;
-  const name = ref.slice(DEFS_REF_PREFIX.length);
-  return Object.prototype.hasOwnProperty.call(defs, name) ? name : null;
+function hasDefs(schema) {
+  return REF_TABLES.some((t) => schema[t] && typeof schema[t] === "object");
 }
 
-// Replace each `$ref: "#/$defs/Name"` with a copy of the definition and drop `$defs`.
+// The key of the definition that `ref` names, such as "$defs/Name", or null when the
+// ref does not point into this schema's own tables.
+function defKey(ref, schema) {
+  if (typeof ref !== "string") return null;
+  for (const table of REF_TABLES) {
+    const prefix = `#/${table}/`;
+    const defs = schema[table];
+    if (!ref.startsWith(prefix) || !defs || typeof defs !== "object") continue;
+    const name = ref.slice(prefix.length);
+    if (Object.prototype.hasOwnProperty.call(defs, name)) return `${table}/${name}`;
+  }
+  return null;
+}
+
+function defByKey(schema, key) {
+  const i = key.indexOf("/");
+  return schema[key.slice(0, i)][key.slice(i + 1)];
+}
+
+// Replace each `$ref` with a copy of the definition and drop `$defs` and `definitions`.
 // Returns null when a ref cannot be resolved or reaches itself.
 //
 // Sibling keys beat the definition's, as in JSON Schema 2020-12. Each branch tracks
 // its own active set, so a definition used twice inlines twice, and only a definition
 // that reaches itself counts as a cycle.
 function inlineDefs(schema) {
-  const defs = schema.$defs;
   let bailed = false;
   const walk = (node, active) => {
     if (Array.isArray(node)) return node.map((n) => walk(n, active));
     if (!node || typeof node !== "object") return node;
     if (typeof node.$ref === "string") {
-      const name = defName(node.$ref, defs);
-      if (name === null || active.has(name)) {
+      const key = defKey(node.$ref, schema);
+      if (key === null || active.has(key)) {
         bailed = true;
         return node;
       }
       const { $ref, ...siblings } = node;
-      return { ...walk(defs[name], new Set(active).add(name)), ...siblings };
+      return { ...walk(defByKey(schema, key), new Set(active).add(key)), ...siblings };
     }
     const out = {};
     for (const [k, v] of Object.entries(node)) out[k] = walk(v, active);
     return out;
   };
   const result = walk(schema, new Set());
-  delete result.$defs;
+  for (const table of REF_TABLES) delete result[table];
   return bailed ? null : result;
 }
 
 // The name of the first definition that reaches itself through `$ref`, or null.
 // Forwarding a cyclic schema can hang the model service, so the caller rejects it.
 function findCyclicDefs(schema) {
-  const defs = schema && schema.$defs;
-  if (!defs || typeof defs !== "object") return null;
+  if (!schema || typeof schema !== "object" || !hasDefs(schema)) return null;
   const scanRefs = (node, into) => {
     if (!node || typeof node !== "object") return;
     if (Array.isArray(node)) { for (const n of node) scanRefs(n, into); return; }
-    const name = defName(node.$ref, defs);
-    if (name !== null) into.add(name);
+    const key = defKey(node.$ref, schema);
+    if (key !== null) into.add(key);
     for (const v of Object.values(node)) scanRefs(v, into);
   };
   const done = new Set();
-  const dfs = (name, stack) => {
-    if (stack.has(name)) return name;
-    if (done.has(name)) return null;
-    stack.add(name);
+  const dfs = (key, stack) => {
+    if (stack.has(key)) return key;
+    if (done.has(key)) return null;
+    stack.add(key);
     const refs = new Set();
-    scanRefs(defs[name], refs);
+    scanRefs(defByKey(schema, key), refs);
     for (const r of refs) {
       const hit = dfs(r, stack);
       if (hit) return hit;
     }
-    stack.delete(name);
-    done.add(name);
+    stack.delete(key);
+    done.add(key);
     return null;
   };
-  for (const name of Object.keys(defs)) {
-    const hit = dfs(name, new Set());
-    if (hit) return hit;
+  for (const table of REF_TABLES) {
+    if (!schema[table] || typeof schema[table] !== "object") continue;
+    for (const name of Object.keys(schema[table])) {
+      const hit = dfs(`${table}/${name}`, new Set());
+      if (hit) return hit.slice(hit.indexOf("/") + 1);
+    }
   }
   return null;
 }
 
-// Apple's dialect: title, x-order, required and additionalProperties on every object
-// reached through `$defs`. The 27.0 builds reject an entry that lacks any of them.
-function decorateDialect(node, titleHint) {
-  if (!node || typeof node !== "object" || Array.isArray(node)) return;
-  if (node.items) decorateDialect(node.items, titleHint);
-  if (!(node.type === "object" || node.properties)) return;
-  const props = node.properties || {};
-  for (const [name, sub] of Object.entries(props)) {
-    decorateDialect(sub, name ? name[0].toUpperCase() + name.slice(1) : "Object");
-  }
-  node.type = "object";
-  if (!node.title) node.title = titleHint;
-  node["x-order"] = Object.keys(props);
-  node.required = Array.isArray(node.required) ? node.required.filter((n) => n in props) : [];
-  if (typeof node.additionalProperties !== "boolean") node.additionalProperties = false;
-}
+const SUBSCHEMA_LISTS = ["anyOf", "oneOf", "allOf"];
+const SUBSCHEMA_MAPS = ["properties", "$defs", "definitions"];
 
-// Collapse every `type` array in place. Nothing else in a response_format schema
-// needs repair.
-function collapseTypeArraysDeep(node) {
-  if (Array.isArray(node)) { node.forEach(collapseTypeArraysDeep); return node; }
+// Repair a response_format schema in place, at every depth: collapse each `type` array,
+// and remove `title` from every node that is not an object. pydantic titles every field.
+function repairResponseNodes(node) {
+  if (Array.isArray(node)) { node.forEach(repairResponseNodes); return node; }
   if (!node || typeof node !== "object") return node;
   if (Array.isArray(node.type)) node.type = firstRealType(node.type);
-  for (const key of ["properties", "$defs", "definitions"]) {
+  const isObject = node.type === "object" || (node.properties && typeof node.properties === "object");
+  if (!isObject && typeof node.title === "string") delete node.title;
+  for (const key of SUBSCHEMA_MAPS) {
     if (node[key] && typeof node[key] === "object") {
-      for (const sub of Object.values(node[key])) collapseTypeArraysDeep(sub);
+      for (const sub of Object.values(node[key])) repairResponseNodes(sub);
     }
   }
-  if (node.items) collapseTypeArraysDeep(node.items);
+  for (const key of SUBSCHEMA_LISTS) if (Array.isArray(node[key])) repairResponseNodes(node[key]);
+  if (node.items) repairResponseNodes(node.items);
   return node;
 }
 
-// A response_format schema. Inline the refs, or inject the dialect when that fails.
+// A response_format schema. Inline the refs when they resolve. A ref that does not
+// resolve is forwarded, and fm serve answers it with a 400 that names it.
 // Returns a new object when it inlines, so the caller must use the return value.
 function fixResponseFormatSchema(schema) {
   if (!schema || typeof schema !== "object") return schema;
-  if (!schema.$defs) return collapseTypeArraysDeep(schema);
-  const inlined = inlineDefs(schema);
-  if (inlined) return collapseTypeArraysDeep(inlined);
-  for (const [name, def] of Object.entries(schema.$defs)) decorateDialect(def, name);
-  return collapseTypeArraysDeep(schema);
+  if (!hasDefs(schema)) return repairResponseNodes(schema);
+  return repairResponseNodes(inlineDefs(schema) || schema);
 }
 
 module.exports = { fixToolSchema, fixResponseFormatSchema, findCyclicDefs };

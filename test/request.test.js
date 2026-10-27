@@ -244,3 +244,58 @@ test("reasoning_effort is forwarded to pcc and to provider models", () => {
     assert.strictEqual(JSON.parse(body).reasoning_effort, "high", model);
   }
 });
+
+// ── tool_choice "none" ─────────────────────────────────────────────────────────────
+// fm serve ignores "none": 5 of 5 replies on 26B123 still held a call, as text with
+// <ctrl46> markers. With no tools offered it answers in prose, tool history and all.
+test("tool_choice none removes tools and tool_choice, and keeps the history", () => {
+  const history = [
+    { role: "user", content: "Weather in Paris?" },
+    { role: "assistant", content: null, tool_calls: [{ id: "c1", type: "function", function: { name: "get_weather", arguments: "{\"city\":\"Paris\"}" } }] },
+    { role: "tool", tool_call_id: "c1", content: "{\"temp_c\":18}" },
+    { role: "user", content: "Thanks. Now just say bye." },
+  ];
+  const { parsed } = rewriteBody(JSON.stringify({ model: "system", messages: history, tool_choice: "none",
+    tools: [{ type: "function", function: { name: "get_weather", description: "d", parameters: { type: "object", properties: {} } } }] }));
+  assert.strictEqual(parsed.tools, undefined);
+  assert.strictEqual(parsed.tool_choice, undefined);
+  assert.deepStrictEqual(parsed.messages, history);
+});
+
+test("tool_choice auto still forwards tools natively", () => {
+  const { parsed } = rewriteBody(JSON.stringify({ model: "system", messages: [{ role: "user", content: "x" }], tool_choice: "auto",
+    tools: [{ type: "function", function: { name: "f", description: "d", parameters: { type: "object", properties: {} } } }] }));
+  assert.strictEqual(parsed.tools.length, 1);
+  assert.strictEqual(parsed.tool_choice, "auto");
+});
+
+// ── stop: the finish comes after all the text ──────────────────────────────────────
+// The relay holds back the last characters in case they start a stop sequence. The
+// finish_reason used to go out first, so a client that stops at it lost those characters.
+test("streaming: with stop set, finish_reason arrives after the last content", async (t) => {
+  const stack = await startStack({
+    handler: (req, parsed, res) => {
+      res.writeHead(200, { "content-type": "text/event-stream" });
+      const chunk = (d) => res.write(`data: ${JSON.stringify(d)}\n\n`);
+      chunk({ id: "x", object: "chat.completion.chunk", model: "system", choices: [{ index: 0, delta: { content: "1, 2, 3, 4, 5" } }] });
+      chunk({ id: "x", object: "chat.completion.chunk", model: "system", choices: [{ index: 0, delta: {}, finish_reason: "stop" }] });
+      res.write("data: [DONE]\n\n");
+      res.end();
+    },
+  });
+  t.after(() => stack.stop());
+  const r = await request(stack.proxyPort,
+    { method: "POST", path: "/v1/chat/completions", headers: { "content-type": "application/json" } },
+    JSON.stringify({ model: "system", stream: true, stop: ["QQQQQQ"], messages: [{ role: "user", content: "x" }] }));
+  let text = "", finishes = 0, contentAfterFinish = false;
+  for (const line of r.body.split("\n")) {
+    if (!line.startsWith("data: {")) continue;
+    const c = JSON.parse(line.slice(6)).choices?.[0];
+    if (!c) continue;
+    if (typeof c.delta?.content === "string" && c.delta.content) { text += c.delta.content; if (finishes) contentAfterFinish = true; }
+    if (c.finish_reason) finishes++;
+  }
+  assert.strictEqual(text, "1, 2, 3, 4, 5");
+  assert.strictEqual(finishes, 1, r.body);
+  assert.strictEqual(contentAfterFinish, false, r.body);
+});

@@ -18,10 +18,6 @@ function classifyError(msg, status) {
   // The tool-call parser rejected the generated arguments. The same request re-fails.
   if (m.includes("failed to parse generated content"))
     return { type: "server_error", code: "generation_parse_failed", retry: false, label: "GENERATION PARSE FAILED" };
-  // A forced tool_choice. The proxy translates these, so only a direct caller sees it.
-  if (m.includes("unsupported generation guide"))
-    return { type: "invalid_request_error", code: "tool_choice_unsupported", retry: false,
-             label: "UNSUPPORTED GENERATION GUIDE (forced tool_choice)" };
   // fm serve reports an overflow as a 500, but the request itself is too large.
   if (m.includes("exceeded the model's context size") || m.includes("exceeds the maximum allowed context"))
     return { type: "invalid_request_error", code: "context_length_exceeded", retry: false,

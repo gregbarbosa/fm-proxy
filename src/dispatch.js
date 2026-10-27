@@ -1,11 +1,10 @@
 // Forced tool calls, translated into structured output.
 //
-// fm serve answers a forced `tool_choice` with `500 An unsupported generation guide was
-// used.`, but it honours `response_format`. So each offered function becomes one
-// property of an object schema, and constrained decoding picks the call.
-//
-// Measured on the 27.0 RC: a named function was called 5 of 5 times, and "required"
-// with two tools routed correctly 10 of 10 times.
+// fm serve does forced calls natively, but it routes worse and costs more prompt
+// tokens. So each offered function becomes one property of an object schema, and
+// constrained decoding picks the call. Measured on 26B123 with five tools: the right
+// tool 9 of 10 times at 142 prompt tokens, against 2 to 5 of 10 at 507 natively.
+// The cost: one call per reply, and a caller's own response_format is replaced.
 //
 // Auto is not translated. Auto must be able to answer without a call, so its schema
 // needs a prose option, and the model then took it 25 of 25 times.
@@ -54,7 +53,10 @@ function applyToolDispatch(parsed, dispatch) {
   const msgs = Array.isArray(parsed.messages) ? parsed.messages : [];
   const sysIdx = msgs.findIndex((m) => m && m.role === "system");
   if (sysIdx >= 0) {
-    msgs[sysIdx] = { ...msgs[sysIdx], content: `${dispatch.instruction}\n\n${msgs[sysIdx].content ?? ""}` };
+    const content = msgs[sysIdx].content;
+    msgs[sysIdx] = { ...msgs[sysIdx], content: Array.isArray(content)
+      ? [{ type: "text", text: dispatch.instruction }, ...content]
+      : `${dispatch.instruction}\n\n${content ?? ""}` };
   } else {
     msgs.unshift({ role: "system", content: dispatch.instruction });
   }

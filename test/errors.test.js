@@ -30,17 +30,6 @@ test("classifyError: LanguageModelError -1 is a retryable rate-limit", () => {
 // request (model + tool_choice) to avoid retry-looping a permanent bug for ~19.5s
 // before mislabeling it as rate_limit_exceeded.
 
-// Beta 5 re-worded the same crash to "An unsupported generation guide was used."
-// That wording matches no other branch, so before it was handled it fell through to
-// the retryable default and burned the whole backoff ladder. It is terminal, and —
-// unlike the Beta 3/4 signature — it needs no request context to be recognised.
-test("classifyError: 'unsupported generation guide' is terminal without request context", () => {
-  const c = classifyError("An unsupported generation guide was used.");
-  assert.strictEqual(c.type, "invalid_request_error");
-  assert.strictEqual(c.code, "tool_choice_unsupported");
-  assert.strictEqual(c.retry, false);
-});
-
 // Beta 3/4 also produced LanguageModelError -1 for a forced tool_choice, so the proxy
 // used to reclassify it by inspecting the request. Beta 5 has its own wording for that,
 // which means this signature can now only be a genuine rate limit — including on a
@@ -89,7 +78,7 @@ test("classifyError: unknown upstream errors are retryable server_errors", () =>
 // retryable default: the proxy burned the full 1+2+4+8s backoff ladder and then
 // surfaced server_error/internal_error. The 400 is deterministic and permanent —
 // retrying re-sends the identical rejection — so it must be terminal and typed
-// invalid_request_error, following the tool_choice_unsupported precedent.
+// invalid_request_error.
 
 test("classifyError: an upstream HTTP 400 is terminal invalid_request_error, not a retryable server_error", () => {
   const c = classifyError("Unknown model 'pcc'. Available models: system.", 400);
@@ -114,10 +103,6 @@ test("classifyError: HTTP 400 only upgrades the generic fallback — specific br
   const gr = classifyError("The model's safety guardrails were triggered.", 400);
   assert.strictEqual(gr.type, "generation_aborted");
   assert.strictEqual(gr.retry, false);
-  // A forced-tool_choice rejection must keep its own code.
-  const tc = classifyError("An unsupported generation guide was used.", 400);
-  assert.strictEqual(tc.type, "invalid_request_error");
-  assert.strictEqual(tc.code, "tool_choice_unsupported");
 });
 
 test("classifyError: no status (backward compatible) still defaults to retryable server_error", () => {
@@ -226,35 +211,6 @@ test("rate-limit error frame (pre-commit) is surfaced as rate_limit_exceeded", a
       { method: "POST", path: "/v1/chat/completions", headers: { "content-type": "application/json" } },
       payload);
     assert.ok(res.body.includes('"type":"rate_limit_exceeded"'), `body=${res.body}`);
-  } finally { await stack.stop(); }
-});
-
-test("a forced tool_choice rejection is typed invalid_request_error through the real proxy, not retried", async () => {
-  // Reproduces the live Beta 5 failure: fm serve's `system` engine 500s with
-  // "An unsupported generation guide was used." when tool_choice forces a call.
-  // The proxy must type it from the message alone and must NOT retry it.
-  let requestCount = 0;
-  const stack = await startStack({
-    handler: (req, parsed, res) => {
-      requestCount++;
-      res.writeHead(500, { "content-type": "application/json" });
-      res.end(JSON.stringify({
-        error: { message: "The operation couldn't be completed. (An unsupported generation guide was used.)", type: "server_error", code: "500" },
-      }));
-    },
-  });
-  try {
-    const payload = JSON.stringify({
-      model: "system", stream: false, tool_choice: "required",
-      messages: [{ role: "user", content: "x" }],
-      tools: [{ type: "function", function: { name: "foo", parameters: { type: "object", properties: {} } } }],
-    });
-    const res = await request(stack.proxyPort,
-      { method: "POST", path: "/v1/chat/completions", headers: { "content-type": "application/json" } },
-      payload);
-    assert.ok(res.body.includes('"type":"invalid_request_error"'), `body=${res.body}`);
-    assert.ok(!/"type":"rate_limit_exceeded"/.test(res.body), `body=${res.body}`);
-    assert.strictEqual(requestCount, 1, "must not retry a permanent client-request-shape bug");
   } finally { await stack.stop(); }
 });
 

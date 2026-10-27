@@ -163,13 +163,16 @@ test("anyOf picks the typed branch, strips the keyword", () => {
   assert.ok(["null", "string"].includes(schema.properties.v.type));
 });
 
-test("primitive params survive untouched (minus stripped keys)", () => {
+test("primitive params keep their description and lose their title", () => {
   const schema = fixToolSchema({
-    properties: { n: { type: "integer", minimum: 0, description: "count" } },
+    properties: { n: { type: "integer", minimum: 0, title: "N", description: "count" } },
   });
   assert.strictEqual(schema.properties.n.type, "integer");
   assert.strictEqual(schema.properties.n.minimum, 0);
-  assert.ok(!("description" in schema.properties.n)); // STRIP_KEYS drops description
+  // The model reads a description: a "YYYY-MM-DD" hint changed 6 of 6 replies on 26B123.
+  assert.strictEqual(schema.properties.n.description, "count");
+  // A titled primitive without an enum is a 400.
+  assert.ok(!("title" in schema.properties.n));
 });
 
 test("required list is preserved for a deeply nested field (array<array<object>>)", () => {
@@ -326,10 +329,9 @@ test("sibling keys alongside a $ref survive and win over the target's", () => {
   assert.deepStrictEqual(out.properties.home.properties, { city: { type: "string" } });
 });
 
-// A self-referencing schema cannot be inlined — expansion would never terminate — so
-// it falls back to the old dialect injection. That is the best available on Beta 3/4,
-// and no worse than the previous behaviour on Beta 5.
-test("a cyclic $ref falls back to dialect injection instead of expanding forever", () => {
+// A self-referencing schema cannot be inlined, so it is forwarded unchanged. The
+// request guard rejects a cyclic response_format before it gets here.
+test("a cyclic $ref is left as it is instead of expanding forever", () => {
   const schema = {
     type: "object",
     properties: { root: { $ref: "#/$defs/Node" } },
@@ -339,11 +341,10 @@ test("a cyclic $ref falls back to dialect injection instead of expanding forever
   };
   const out = fixResponseFormatSchema(schema);
   assert.ok(out.$defs, "cyclic schema keeps $defs");
-  assert.strictEqual(out.$defs.Node.title, "Node");
-  assert.deepStrictEqual(out.$defs.Node["x-order"], ["child"]);
+  assert.strictEqual(out.$defs.Node["x-order"], undefined, "no dialect is injected");
 });
 
-test("an unresolvable $ref falls back rather than dropping the reference", () => {
+test("an unresolvable $ref is forwarded rather than dropped", () => {
   const out = fixResponseFormatSchema({
     type: "object",
     properties: { x: { $ref: "#/$defs/Missing" } },
@@ -528,4 +529,70 @@ test("a cyclic $defs in a TOOL schema is not rejected by the response_format gua
     }],
   }));
   assert.strictEqual(cycle, undefined);
+});
+
+// ── 27.2 floor: pydantic titles and draft-07 definitions ───────────────────────────
+test("response_format: title is removed from every primitive, at every depth", () => {
+  const out = fixResponseFormatSchema({
+    type: "object", title: "Model",
+    properties: {
+      name: { type: "string", title: "Name" },
+      tags: { type: "array", title: "Tags", items: { type: "string", title: "Tag" } },
+      maybe: { anyOf: [{ type: "string", title: "S" }, { type: "null" }], title: "Maybe" },
+      kind: { type: "string", title: "Kind", enum: ["a", "b"] },
+      inner: { type: "object", title: "Inner", properties: { n: { type: "integer", title: "N" } } },
+    },
+  });
+  assert.strictEqual(out.title, "Model", "an object keeps its title");
+  assert.strictEqual(out.properties.inner.title, "Inner");
+  for (const node of [out.properties.name, out.properties.tags, out.properties.tags.items,
+    out.properties.maybe, out.properties.maybe.anyOf[0], out.properties.kind, out.properties.inner.properties.n]) {
+    assert.ok(!("title" in node), JSON.stringify(node));
+  }
+  assert.deepStrictEqual(out.properties.kind.enum, ["a", "b"]);
+});
+
+test("response_format: pydantic titles inside $defs are removed after inlining", () => {
+  const out = fixResponseFormatSchema({
+    type: "object", title: "Person",
+    properties: { addr: { $ref: "#/$defs/Address" } },
+    $defs: { Address: { type: "object", title: "Address", properties: { street: { type: "string", title: "Street" } } } },
+  });
+  assert.strictEqual(out.$defs, undefined);
+  assert.strictEqual(out.properties.addr.title, "Address");
+  assert.deepStrictEqual(out.properties.addr.properties.street, { type: "string" });
+});
+
+test("response_format: draft-07 #/definitions/ refs are inlined", () => {
+  const out = fixResponseFormatSchema({
+    type: "object",
+    properties: { p: { $ref: "#/definitions/P" } },
+    definitions: { P: { type: "object", properties: { a: { type: "integer" } }, required: ["a"] } },
+  });
+  assert.strictEqual(out.definitions, undefined);
+  assert.deepStrictEqual(out.properties.p, { type: "object", properties: { a: { type: "integer" } }, required: ["a"] });
+});
+
+test("tool params: draft-07 #/definitions/ refs are resolved, not flattened to {}", () => {
+  const schema = fixToolSchema({
+    type: "object", required: ["p"],
+    properties: { p: { $ref: "#/definitions/P" } },
+    definitions: { P: { type: "object", properties: { a: { type: "string" } }, required: ["a"] } },
+  });
+  assert.deepStrictEqual(schema.properties.p, { type: "object", properties: { a: { type: "string" } }, required: ["a"] });
+});
+
+test("findCyclicDefs: a cycle through definitions is detected", () => {
+  assert.strictEqual(findCyclicDefs({
+    definitions: { N: { type: "object", properties: { k: { $ref: "#/definitions/N" } } } },
+  }), "N");
+});
+
+test("a ref into the other table does not resolve", () => {
+  const out = fixResponseFormatSchema({
+    type: "object",
+    properties: { p: { $ref: "#/definitions/P" } },
+    $defs: { P: { type: "object", properties: {} } },
+  });
+  assert.strictEqual(out.properties.p.$ref, "#/definitions/P");
 });

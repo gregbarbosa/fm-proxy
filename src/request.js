@@ -23,11 +23,14 @@ function rewriteRequest(body) {
   // fm serve 400s on `reasoning_effort` for `system`. `pcc` and provider models use it.
   if (!parsed.model || parsed.model === "system") delete parsed.reasoning_effort;
 
-  // Before the tool rewrite: a dispatched request sends no tools at all.
-  const dispatch = buildToolDispatch(parsed);
-  if (dispatch) applyToolDispatch(parsed, dispatch);
+  // fm serve ignores `none` and still writes a call, as text with template markers.
+  // With no tools offered it answers in prose, and the history may keep its tool turns.
+  if (parsed.tool_choice === "none") {
+    delete parsed.tools;
+    delete parsed.tool_choice;
+  }
 
-  if (parsed.tools) {
+  if (Array.isArray(parsed.tools)) {
     parsed.tools = parsed.tools.map((tool) => ({
       ...tool,
       function: {
@@ -38,6 +41,11 @@ function rewriteRequest(body) {
       },
     }));
   }
+
+  // After the tool rewrite, so the dispatch schema is built from parameters that fm
+  // serve accepts. A dispatched request sends no tools at all.
+  const dispatch = buildToolDispatch(parsed);
+  if (dispatch) applyToolDispatch(parsed, dispatch);
 
   const js = parsed.response_format && parsed.response_format.type === "json_schema"
     ? parsed.response_format.json_schema : null;

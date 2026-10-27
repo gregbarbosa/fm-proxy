@@ -1,9 +1,8 @@
 // Relays one non-streaming chat completion. The whole reply is buffered first, so a
 // transient failure can still be retried.
-const { STRIP_MARKERS } = require("./config");
 const { classifyError, isErrorPayload, typedError } = require("./errors");
 const { dispatchToToolCalls } = require("./dispatch");
-const { stripTemplateMarkers, truncateAtStop } = require("./text");
+const { truncateAtStop } = require("./text");
 const { relayHead, writeSseHead, diag, logToks } = require("./http");
 
 // Tool-call arguments go out in pieces of this size, as OpenAI streams them.
@@ -28,7 +27,7 @@ function contentFilterCompletion(ctx) {
   };
 }
 
-// Edits to a successful reply, in order: dispatch, markers, stop, cap.
+// Edits to a successful reply, in order: dispatch, stop, cap.
 function fixReply(obj, ctx) {
   const msg = obj.choices && obj.choices[0] && obj.choices[0].message;
   if (ctx.dispatch && msg && typeof msg.content === "string") {
@@ -40,9 +39,6 @@ function fixReply(obj, ctx) {
     } else {
       diag("DISPATCH UNPARSED (relaying content)", `— ${msg.content.slice(0, 120)}`);
     }
-  }
-  if (STRIP_MARKERS && msg && typeof msg.content === "string") {
-    msg.content = stripTemplateMarkers(msg.content);
   }
   if (msg && typeof msg.content === "string" && ctx.stopSequences) {
     const { text, hit } = truncateAtStop(msg.content, ctx.stopSequences);
@@ -110,6 +106,9 @@ function relayNonStreamingChat({ res, proxyRes, gate, ctx, reqStart }) {
         diag(`${cls.label} (non-stream)`, `— ${raw.slice(0, 200)}`);
         if (cls.retry && gate.fail("non-stream error")) return;
         if (typeof obj.error === "object") obj.error = typedError(cls, obj.error.message);
+        // fm serve sends some request errors, such as an overflow, as a 500. The OpenAI
+        // SDKs retry a 5xx, and that re-sends a request that cannot succeed.
+        if (cls.type === "invalid_request_error" && status === 500) status = 400;
       }
     } else if (obj) {
       fixReply(obj, ctx);

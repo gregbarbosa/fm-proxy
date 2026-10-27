@@ -146,3 +146,60 @@ test("streaming: a cap and a stop sequence in the same chunk both apply", async 
   }
   assert.strictEqual(text, "hello ");
 });
+
+// ── a cap does not relabel a tool call ─────────────────────────────────────────────
+// A complete tool call that lands on the cap is not truncated text. An agent does not
+// run a call reported as "length".
+test("streaming: a capped tool call keeps finish_reason tool_calls", async (t) => {
+  const stack = await startStack({
+    handler: (req, parsed, res) => {
+      res.writeHead(200, { "content-type": "text/event-stream" });
+      const chunk = (d) => res.write(`data: ${JSON.stringify(d)}\n\n`);
+      chunk({ id: "x", object: "chat.completion.chunk", model: "system", choices: [{ index: 0, delta: { tool_calls: [{ index: 0, id: "c1", type: "function", function: { name: "f", arguments: "{}" } }] } }] });
+      chunk({ id: "x", object: "chat.completion.chunk", model: "system", choices: [{ index: 0, delta: {}, finish_reason: "tool_calls" }] });
+      chunk({ id: "x", object: "chat.completion.chunk", model: "system", choices: [], usage: { prompt_tokens: 5, completion_tokens: 20, total_tokens: 25 } });
+      res.write("data: [DONE]\n\n");
+      res.end();
+    },
+  });
+  t.after(() => stack.stop());
+  const r = await request(stack.proxyPort,
+    { method: "POST", path: "/v1/chat/completions", headers: { "content-type": "application/json" } },
+    JSON.stringify({ model: "system", stream: true, max_completion_tokens: 15, messages: [{ role: "user", content: "x" }] }));
+  const finishes = r.body.match(/"finish_reason":"[a-z_]+"/g) || [];
+  assert.deepStrictEqual(finishes, ['"finish_reason":"tool_calls"'], r.body);
+});
+
+// ── a request error is a 400, so an SDK does not retry it ──────────────────────────
+// fm serve sends an overflow as a 500. The OpenAI SDKs retry a 5xx twice, which sends
+// the oversized prompt again.
+test("non-streaming: an overflow comes back as HTTP 400", async () => {
+  const stack = await startStack({
+    handler: (req, parsed, res) => {
+      res.writeHead(500, { "content-type": "application/json" });
+      res.end(JSON.stringify({ error: { type: "server_error", code: "500", message: OVERFLOW_UP } }));
+    },
+  });
+  try {
+    const res = await request(stack.proxyPort,
+      { method: "POST", path: "/v1/chat/completions", headers: { "content-type": "application/json" } },
+      JSON.stringify({ model: "system", stream: false, messages: [{ role: "user", content: "hi" }] }));
+    assert.strictEqual(res.status, 400, res.body);
+    assert.strictEqual(JSON.parse(res.body).error.code, "context_length_exceeded");
+  } finally { await stack.stop(); }
+});
+
+test("non-streaming: a retryable upstream 500 still ends as a 500", async () => {
+  const stack = await startStack({
+    handler: (req, parsed, res) => {
+      res.writeHead(500, { "content-type": "application/json" });
+      res.end(JSON.stringify({ error: { type: "server_error", code: "500", message: "something broke" } }));
+    },
+  });
+  try {
+    const res = await request(stack.proxyPort,
+      { method: "POST", path: "/v1/chat/completions", headers: { "content-type": "application/json" } },
+      JSON.stringify({ model: "system", stream: false, messages: [{ role: "user", content: "hi" }] }));
+    assert.strictEqual(res.status, 500, res.body);
+  } finally { await stack.stop(); }
+});

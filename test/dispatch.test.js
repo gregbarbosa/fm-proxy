@@ -4,11 +4,10 @@ const { buildToolDispatch, dispatchToToolCalls } = require("../src/dispatch");
 const { startStack, postChat, rewriteBody } = require("./helpers");
 
 // ── forced tool dispatch ────────────────────────────────────────────────────
-// fm serve rejects a forced tool_choice with 500 "unsupported generation guide", but
-// it does honour response_format. buildToolDispatch translates the forced call into a
-// schema, so constrained decoding does the work the tool parser cannot.
-// Measured on the 27.0 RC before this was written: forced 5/5, and with two tools and
-// no prose escape the model routed correctly 10/10.
+// fm serve does forced calls natively on 26B123, but it routes worse and costs more
+// prompt tokens. buildToolDispatch translates the forced call into a response_format
+// schema, so constrained decoding picks the call. With five tools it chose the right
+// one 9 of 10 times at 142 prompt tokens, against 2 to 5 of 10 at 507 natively.
 
 test("buildToolDispatch returns null unless a tool_choice is forced", () => {
   const tools = [{ type: "function", function: { name: "f", description: "d",
@@ -242,4 +241,43 @@ test("streaming dispatch: the synthesised frames carry the request's model", asy
   const r = await postChat(stack, JSON.stringify(body));
   const first = JSON.parse(r.body.split("\n").find((l) => l.startsWith("data: ")).slice(6));
   assert.strictEqual(first.model, "pcc");
+});
+
+// ── the dispatch schema is built from the fixed tool schema ─────────────────────
+// It was built from the raw parameters before the tool rewrite, so a `$ref`, an
+// `anyOf` or a titled string reached fm serve and the forced call failed with a 400
+// that the same tool under auto did not get.
+test("a forced call on a $ref, anyOf and titled-string tool sends a schema fm serve accepts", () => {
+  const { parsed } = rewriteBody(JSON.stringify({
+    model: "system", messages: [{ role: "user", content: "x" }], tool_choice: "required",
+    tools: [{ type: "function", function: { name: "book", description: "Book a trip", parameters: {
+      type: "object", required: ["who", "when"],
+      properties: {
+        who: { $ref: "#/$defs/Person" },
+        size: { anyOf: [{ type: "integer" }, { type: "string" }] },
+        when: { type: "string", title: "When", description: "YYYY-MM-DD" },
+      },
+      $defs: { Person: { type: "object", title: "Person", properties: { name: { type: "string", title: "Name" } }, required: ["name"] } },
+    } } }],
+  }));
+  const text = JSON.stringify(parsed.response_format);
+  assert.ok(!text.includes("$ref") && !text.includes("$defs") && !text.includes("anyOf"), text);
+  const book = parsed.response_format.json_schema.schema.properties.book;
+  assert.deepStrictEqual(book.required, ["who", "when"]);
+  assert.deepStrictEqual(book.properties.who.properties.name, { type: "string" });
+  assert.deepStrictEqual(book.properties.when, { type: "string", description: "YYYY-MM-DD" });
+  assert.strictEqual(book.properties.size.type, "integer");
+  assert.strictEqual(parsed.tools, undefined);
+});
+
+test("the dispatch instruction is added as a part to a system message with content parts", () => {
+  const { parsed } = rewriteBody(JSON.stringify({
+    model: "system", tool_choice: "required",
+    messages: [{ role: "system", content: [{ type: "text", text: "Be terse." }] }, { role: "user", content: "x" }],
+    tools: [{ type: "function", function: { name: "f", description: "d", parameters: { type: "object", properties: {} } } }],
+  }));
+  const content = parsed.messages[0].content;
+  assert.ok(Array.isArray(content), JSON.stringify(content));
+  assert.match(content[0].text, /MUST call exactly one/);
+  assert.deepStrictEqual(content[1], { type: "text", text: "Be terse." });
 });
