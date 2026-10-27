@@ -193,11 +193,30 @@ function findCyclicDefs(schema) {
 const SUBSCHEMA_LISTS = ["anyOf", "oneOf", "allOf"];
 const SUBSCHEMA_MAPS = ["properties", "$defs", "definitions"];
 
-// Repair a response_format schema in place, at every depth: collapse each `type` array,
-// and remove `title` from every node that is not an object. pydantic titles every field.
+const isNullSchema = (s) => !!s && typeof s === "object" && s.type === "null";
+
+// pydantic's Optional[X] is `anyOf: [X, {type: "null"}]`. Replace it with X in place, as
+// a `type` array collapses: a field the prompt does not mention made the model run on
+// until the window was full in 4 of 6 replies, against 1 of 6 for plain X (26B123).
+function collapseNullableUnion(node) {
+  for (const key of ["anyOf", "oneOf"]) {
+    const subs = node[key];
+    if (!Array.isArray(subs)) continue;
+    const real = subs.filter((sub) => !isNullSchema(sub));
+    if (real.length !== 1 || real.length === subs.length) continue;
+    delete node[key];
+    if (node.default === null) delete node.default;
+    for (const [k, v] of Object.entries(real[0])) if (!(k in node)) node[k] = v;
+  }
+}
+
+// Repair a response_format schema in place, at every depth: collapse each `type` array
+// and nullable union, and remove `title` from every node that is not an object.
+// pydantic titles every field.
 function repairResponseNodes(node) {
   if (Array.isArray(node)) { node.forEach(repairResponseNodes); return node; }
   if (!node || typeof node !== "object") return node;
+  collapseNullableUnion(node);
   if (Array.isArray(node.type)) node.type = firstRealType(node.type);
   const isObject = node.type === "object" || (node.properties && typeof node.properties === "object");
   if (!isObject && typeof node.title === "string") delete node.title;

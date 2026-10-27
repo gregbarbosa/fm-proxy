@@ -538,7 +538,7 @@ test("response_format: title is removed from every primitive, at every depth", (
     properties: {
       name: { type: "string", title: "Name" },
       tags: { type: "array", title: "Tags", items: { type: "string", title: "Tag" } },
-      maybe: { anyOf: [{ type: "string", title: "S" }, { type: "null" }], title: "Maybe" },
+      maybe: { anyOf: [{ type: "string", title: "S" }, { type: "integer" }], title: "Maybe" },
       kind: { type: "string", title: "Kind", enum: ["a", "b"] },
       inner: { type: "object", title: "Inner", properties: { n: { type: "integer", title: "N" } } },
     },
@@ -595,4 +595,20 @@ test("a ref into the other table does not resolve", () => {
     $defs: { P: { type: "object", properties: {} } },
   });
   assert.strictEqual(out.properties.p.$ref, "#/definitions/P");
+});
+
+test("response_format: a nullable anyOf collapses to its one real branch", () => {
+  const out = fixResponseFormatSchema({
+    type: "object",
+    properties: {
+      nick: { anyOf: [{ type: "string" }, { type: "null" }], default: null, title: "Nick" },
+      when: { oneOf: [{ type: "null" }, { type: "string", description: "YYYY-MM-DD" }] },
+      addr: { anyOf: [{ type: "object", title: "Addr", properties: { s: { type: "string", title: "S" } } }, { type: "null" }] },
+      either: { anyOf: [{ type: "string" }, { type: "integer" }, { type: "null" }] },
+    },
+  });
+  assert.deepStrictEqual(out.properties.nick, { type: "string" });
+  assert.deepStrictEqual(out.properties.when, { type: "string", description: "YYYY-MM-DD" });
+  assert.deepStrictEqual(out.properties.addr, { type: "object", title: "Addr", properties: { s: { type: "string" } } });
+  assert.strictEqual(out.properties.either.anyOf.length, 3, "a real union is left alone");
 });
