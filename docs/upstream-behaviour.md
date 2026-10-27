@@ -23,7 +23,7 @@ re-derive it from the release history in `docs/audit.md`.
 | `parallel_tool_calls` | Accepted, then ignored |
 | `max_tokens` | Ignored. Only `max_completion_tokens` caps the reply, so the proxy maps one to the other. |
 | Prompt framing | `hello world` is 57 `prompt_tokens` |
-| Context window | 4096 tokens. 4008 passes, ~4150 overflows. |
+| Context window | 4096 tokens. A 4056-token prompt passes, about 4106 overflows (26B123). |
 | `$defs` entry with `title` and `required` | `200` in one to three seconds. Objects nested in the entry need no keys. |
 | `$defs` entry with no `title` | `400` naming `undefinedReferences` |
 | `$defs`, **cyclic** | A prompt that makes it recurse generates for about 2 minutes (114 s measured), then fails with `500` context exceeded. A control request passed 2 s later. |
@@ -233,8 +233,8 @@ A one-line message frames to 57 `prompt_tokens`.
 
 ## Context budget
 
-The window is 4096 tokens, and that is the whole budget. A 4045-token prompt passes and
-about 4255 overflows on `system`. On 27.2, `pcc` has a window of about 32k, but only from
+The window is 4096 tokens, and that is the whole budget. On `system`, a 4056-token prompt
+passes and about 4106 overflows. On 27.2, `pcc` has a window of about 32k, but only from
 a Terminal.app context.
 
 An agent client's own gauge reads low, because it counts only `messages[].content` while
@@ -278,8 +278,16 @@ refs for named types, and pydantic titles every field.
 **Nullable unions.** An optional field typed `anyOf:[X, {type:"null"}]`, which pydantic
 emits for `Optional[X] = None`, makes the model run away when the prompt gives no value
 for it. The reply grows until the context is exceeded, about 88 s later. The proxy
-collapses such a union to `X` and drops a `default: null`. Through the proxy, the same
-pydantic schema failed 1 time in 11 streaming requests, against 4 in 6 before. Repeated
+collapses such a union, or a `type` array with `"null"`, to `X` and drops a
+`default: null`. Through the proxy, the same pydantic schema failed 1 time in 11
+streaming requests, against 4 in 6 before.
+
+A required field runs away the same way. The OpenAI SDK's `parse()` sends a strict
+schema that lists every field in `required`, the nullable ones too. Direct to `fm serve`,
+a required collapsed field ran away in 2 of 5 replies, and the same field left out of
+`required` in 0 of 5. So the proxy also removes a nullable field from its parent's
+`required`, and the model can leave it out. Through the proxy, `parse()` then failed 2
+times in 9, against 3 in 6 before. The runaway is upstream, and the proxy cannot stop it. Repeated
 runaways can leave the model service failing with
 `com.apple.SensitiveContentAnalysisML error 15` for about 8 minutes.
 

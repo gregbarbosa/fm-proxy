@@ -199,6 +199,21 @@ const isNullSchema = (s) => !!s && typeof s === "object" && s.type === "null";
 // pydantic's Optional[X] is `anyOf: [X, {type: "null"}]`. Replace it with X in place, as
 // a `type` array collapses: a field the prompt does not mention made the model run on
 // until the window was full in 4 of 6 replies, against 1 of 6 for plain X (26B123).
+function isNullableUnion(node) {
+  if (!node || typeof node !== "object") return false;
+  if (Array.isArray(node.type)) return node.type.includes("null") && node.type.some((t) => t !== "null");
+  return ["anyOf", "oneOf"].some((key) => Array.isArray(node[key]) &&
+    node[key].some(isNullSchema) && node[key].filter((sub) => !isNullSchema(sub)).length === 1);
+}
+
+// A required field that collapsed to a plain X must still be filled. The OpenAI SDK's
+// parse() marks every field required, so with no value in the prompt the model ran on
+// until the window was full in 2 of 5 replies, against 0 of 5 when it was optional.
+function unrequireNullable(node) {
+  if (!Array.isArray(node.required) || !node.properties || typeof node.properties !== "object") return;
+  node.required = node.required.filter((k) => !isNullableUnion(node.properties[k]));
+}
+
 function collapseNullableUnion(node) {
   for (const key of ["anyOf", "oneOf"]) {
     const subs = node[key];
@@ -212,11 +227,13 @@ function collapseNullableUnion(node) {
 }
 
 // Repair a response_format schema in place, at every depth: collapse each `type` array
-// and nullable union, and remove `title` from every node that is not an object.
+// and nullable union, take a nullable field out of `required`, and remove `title` from
+// every node that is not an object.
 // pydantic titles every field.
 function repairResponseNodes(node) {
   if (Array.isArray(node)) { node.forEach(repairResponseNodes); return node; }
   if (!node || typeof node !== "object") return node;
+  unrequireNullable(node);
   collapseNullableUnion(node);
   if (Array.isArray(node.type)) node.type = firstRealType(node.type);
   const isObject = node.type === "object" || (node.properties && typeof node.properties === "object");

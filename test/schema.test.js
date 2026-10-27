@@ -609,3 +609,23 @@ test("a tool anyOf with null first keeps the real type", () => {
     note: { anyOf: [{ type: "null" }, { type: "string" }], description: "a note" } } });
   assert.deepStrictEqual(out.properties.note, { type: "string", description: "a note" });
 });
+
+// The OpenAI SDK's parse() marks every field required, a nullable one too. As a required
+// plain string, a field the prompt does not mention made the model run away until the
+// window was full: 2 of 5 replies, against 0 of 5 when it was optional (26B123).
+test("a nullable field leaves the parent's required list when it collapses", () => {
+  const out = fixResponseFormatSchema({ type: "object", additionalProperties: false,
+    required: ["name", "nickname", "alias", "address"],
+    properties: {
+      name: { type: "string" },
+      nickname: { anyOf: [{ type: "string" }, { type: "null" }] },
+      alias: { type: ["string", "null"] },
+      address: { type: "object", required: ["city", "unit"], properties: {
+        city: { type: "string" }, unit: { anyOf: [{ type: "null" }, { type: "integer" }] } } },
+    } });
+  assert.deepStrictEqual(out.required, ["name", "address"]);
+  assert.deepStrictEqual(out.properties.nickname, { type: "string" });
+  assert.deepStrictEqual(out.properties.alias, { type: "string" });
+  assert.deepStrictEqual(out.properties.address.required, ["city"]);
+  assert.deepStrictEqual(out.properties.address.properties.unit, { type: "integer" });
+});

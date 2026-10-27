@@ -86,6 +86,8 @@ const RF_DEFS = { type: "json_schema", json_schema: { name: "P", schema: { type:
 const TOOL_DESCRIBED = { type: "function", function: { name: "forecast", description: "Forecast", parameters: { type: "object", properties: { date: { type: "string", title: "Date", description: "YYYY-MM-DD" } }, required: ["date"] } } };
 const TOOL_DEFINITIONS = { type: "function", function: { name: "set_home", description: "Set home", parameters: { type: "object", properties: { home: { $ref: "#/definitions/Address" } }, required: ["home"], definitions: { Address: { type: "object", properties: { city: { type: "string" } }, required: ["city"] } } } } };
 const RF_PYDANTIC = { type: "json_schema", json_schema: { name: "Person", schema: { type: "object", title: "Person", properties: { name: { type: "string", title: "Name" }, nickname: { anyOf: [{ type: "string" }, { type: "null" }], default: null, title: "Nickname" }, address: { $ref: "#/$defs/Address" } }, required: ["name", "address"], $defs: { Address: { type: "object", title: "Address", properties: { street: { type: "string", title: "Street" } }, required: ["street"] } } } } };
+// The OpenAI SDK's parse() sends a strict schema: every field required, a nullable one too.
+const RF_STRICT = { type: "json_schema", json_schema: { name: "P", strict: true, schema: { type: "object", additionalProperties: false, properties: { name: { type: "string" }, nickname: { anyOf: [{ type: "string" }, { type: "null" }] } }, required: ["name", "nickname"] } } };
 const RF_DEFINITIONS = { type: "json_schema", json_schema: { name: "P", schema: { type: "object", properties: { p: { $ref: "#/definitions/P" } }, required: ["p"], definitions: { P: { type: "object", properties: { a: { type: "integer" } }, required: ["a"] } } } } };
 const RF_CYCLE = { type: "json_schema", json_schema: { name: "N", schema: { type: "object", properties: { root: { $ref: "#/$defs/Node" } }, $defs: { Node: { type: "object", properties: { child: { $ref: "#/$defs/Node" } } } } } } };
 const M = [{ role: "user", content: "Say hi" }];
@@ -119,6 +121,7 @@ const CASES = [
   ["tool param description kept", { model: "system", messages: M, tools: [TOOL_DESCRIBED], max_tokens: 10, stream: false }],
   ["tool with definitions ref", { model: "system", messages: M, tools: [TOOL_DEFINITIONS], max_tokens: 10, stream: false }],
   ["response_format pydantic titles", { model: "system", messages: M, response_format: RF_PYDANTIC, max_tokens: 10, stream: false }],
+  ["response_format strict nullable", { model: "system", messages: M, response_format: RF_STRICT, max_tokens: 10, stream: false }],
   ["response_format definitions ref", { model: "system", messages: M, response_format: RF_DEFINITIONS, max_tokens: 10, stream: false }],
   ["unknown model", { model: "not-a-model", messages: M, max_tokens: 10, stream: false }],
 ];
