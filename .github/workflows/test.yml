@@ -5,6 +5,8 @@ on:
 jobs:
   test:
     runs-on: ubuntu-latest
+    # The suite takes under a minute. A hung test process must not hold the runner.
+    timeout-minutes: 5
     strategy:
       matrix:
         node: [18, 20, 22]

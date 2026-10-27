@@ -358,7 +358,7 @@ test("a chunked upload reaches fm serve with Content-Length and no Transfer-Enco
   t.after(() => stack.stop());
   const body = JSON.stringify({ model: "system", stream: false, messages: [{ role: "user", content: "hi" }] });
   const status = await new Promise((resolve, reject) => {
-    const req = http.request({ host: "127.0.0.1", port: stack.proxyPort, method: "POST",
+    const req = http.request({ host: "127.0.0.1", port: stack.proxyPort, method: "POST", agent: false,
       path: "/v1/chat/completions", headers: { "content-type": "application/json" } }, (res) => {
       res.resume();
       res.on("end", () => resolve(res.statusCode));

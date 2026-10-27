@@ -28,7 +28,8 @@ function freePort() {
 // One-shot request helper. Returns { status, headers, body }.
 function request(port, opts, payload) {
   return new Promise((resolve, reject) => {
-    const req = http.request({ host: "127.0.0.1", port, ...opts }, (res) => {
+    // No keep-alive agent: an idle pooled socket can keep a test process alive.
+    const req = http.request({ host: "127.0.0.1", port, agent: false, ...opts }, (res) => {
       let body = "";
       res.on("data", (c) => (body += c));
       res.on("end", () => resolve({ status: res.statusCode, headers: res.headers, body }));
@@ -93,9 +94,20 @@ async function startStack({ handler, deadUpstream = false, maxRetries = 0, env =
     getLastBody: () => lastBody,
     getStderr: () => stderr,
     getStdout: () => stdout,
+    // Wait for the proxy to exit, and drop the stub's open connections, so nothing keeps
+    // the test process alive after its last test.
     async stop() {
-      child.kill();
-      if (upstream) await new Promise((r) => upstream.close(r));
+      if (child.exitCode == null && child.signalCode == null) {
+        const exited = new Promise((r) => child.once("exit", r));
+        child.kill();
+        const forced = setTimeout(() => child.kill("SIGKILL"), 2000);
+        await exited;
+        clearTimeout(forced);
+      }
+      if (upstream) {
+        upstream.closeAllConnections();
+        await new Promise((r) => upstream.close(r));
+      }
     },
   };
 }
