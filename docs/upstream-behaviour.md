@@ -21,7 +21,7 @@ re-derive it from the release history in `docs/audit.md`.
 | `stream` omitted | Returns `text/event-stream`, not one JSON object |
 | `n > 1` | `400 n=2 is not supported.` |
 | `parallel_tool_calls` | Accepted, then ignored |
-| `max_tokens` | Ignored. The proxy truncates. |
+| `max_tokens` | Ignored. Only `max_completion_tokens` caps the reply, so the proxy maps one to the other. |
 | Prompt framing | `hello world` is 57 `prompt_tokens` |
 | Context window | 4096 tokens. 4008 passes, ~4150 overflows. |
 | `$defs` entry with `title` and `required` | `200` in one to three seconds. Objects nested in the entry need no keys. |
@@ -104,8 +104,8 @@ no `tool_choice`, only the schema and a short system instruction.
 `dispatchToToolCalls` turns the reply back into OpenAI `tool_calls`.
 
 **Auto is not translated.** Auto must be able to answer without calling a tool, so the
-schema needs a prose escape. Given that escape, the model took it 0 of 25 times, even
-when the prompt named the function.
+schema needs a prose escape. Given that escape, the model took the escape 25 of 25 times,
+even when the prompt named the function.
 
 A streaming client is served from a buffered reply. A dispatched reply is one JSON object
 and cannot name a tool until it has arrived whole, so the proxy asks `fm serve` for a

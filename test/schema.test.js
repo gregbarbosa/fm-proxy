@@ -213,17 +213,9 @@ test("required filters out names that no longer exist", () => {
   assert.deepStrictEqual(schema.required, ["a"]);
 });
 
-// ── response_format schema dialect (structured output) ────────────────────────
-// Live-verified against a real `fm serve` (2026-07-06, fm 2.0.59, macOS 27 Beta 3):
-// the title/x-order/required/additionalProperties dialect is required ONLY on
-// object schemas reached through `$defs` (the $defs entries themselves, and any
-// object nested inside one -- inline sub-properties, array items -- recursively).
-// The top-level schema and any object reached purely through inline `properties`
-// nesting (never touching $defs) decode with ZERO dialect keys, contrary to the
-// original 2026-06-14 finding (which only tested $ref/$defs-shaped schemas). Real
-// schema generators (pydantic .model_json_schema(), zod-to-json-schema, ...)
-// virtually always emit $defs/$ref for named/reused types, so this still breaks
-// structured output for real clients -- just narrower than "every object level".
+// ── response_format schemas (structured output) ───────────────────────────────
+// The proxy inlines every $ref and removes `title` from non-object nodes. It adds
+// no keys: an inline object needs no title, x-order or additionalProperties.
 
 test("flat response_format schema with no $defs is left completely untouched", () => {
   const schema = {
@@ -274,12 +266,11 @@ test("a $defs/$ref schema is inlined: the ref is replaced and $defs is dropped",
     properties: { street: { type: "string" }, city: { type: "string" } },
     required: ["street"],
   });
-  // Inlined objects are reached only through `properties`, so they need NO dialect.
-  // Adding it is what hangs the system engine on Beta 5.
+  // Inlined objects need no added keys.
   assert.strictEqual(out.properties.address.title, undefined);
   assert.strictEqual(out.properties.address["x-order"], undefined);
   assert.strictEqual(out.properties.address.additionalProperties, undefined);
-  assert.strictEqual(out.title, undefined, "top level stays dialect-free too");
+  assert.strictEqual(out.title, undefined, "no title is added at the top level");
 });
 
 test("a $ref inside an array's items is inlined", () => {
@@ -341,7 +332,7 @@ test("a cyclic $ref is left as it is instead of expanding forever", () => {
   };
   const out = fixResponseFormatSchema(schema);
   assert.ok(out.$defs, "cyclic schema keeps $defs");
-  assert.strictEqual(out.$defs.Node["x-order"], undefined, "no dialect is injected");
+  assert.strictEqual(out.$defs.Node["x-order"], undefined, "no x-order is added");
 });
 
 test("an unresolvable $ref is forwarded rather than dropped", () => {
@@ -482,7 +473,7 @@ test("fixTools inlines response_format.json_schema.schema.$defs in the request b
   assert.deepStrictEqual(schema.properties.address, {
     type: "object", properties: { street: { type: "string" } }, required: ["street"],
   });
-  assert.strictEqual(schema.title, undefined, "no dialect anywhere");
+  assert.strictEqual(schema.title, undefined, "no title is added");
 });
 
 test("fixTools leaves a request with no response_format untouched (no crash, no field added)", () => {

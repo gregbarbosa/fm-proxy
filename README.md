@@ -125,8 +125,10 @@ the call.
 ## Errors
 
 Errors come back in the OpenAI shape, `{"error": {"message", "type", "code"}}`, typed so
-that a client can branch on the cause. A non-streaming `invalid_request_error` that
-`fm serve` sent as a 500 comes back as a 400, so an OpenAI SDK does not retry it.
+that a client can branch on the cause. An error before any output is an HTTP error with a
+JSON body, also on a streaming request. An error after the stream started is an error
+frame, then `[DONE]`. An `invalid_request_error` that `fm serve` sent as a 500 comes back
+as a 400, so an OpenAI SDK does not retry it.
 
 | `type` / `code` | Cause | Retry |
 |---|---|---|
@@ -141,6 +143,7 @@ that a client can branch on the cause. A non-streaming `invalid_request_error` t
 | `invalid_request_error` / `invalid_request` | Any other `400`, such as an unknown model or `n > 1`. | No. |
 | `server_error` / `model_service_unavailable` | The on-device model service is in the `SensitiveContentAnalysisML error 15` state. It clears itself, in less than a minute to about 8 minutes. | Yes, after some minutes. The proxy does not retry it. |
 | `rate_limit_exceeded` | A transient capacity error. The proxy has already retried it. | Yes, later. |
+| `server_error` / `upstream_closed` | `fm serve` closed the connection before the reply ended. The proxy has already retried it if nothing was sent. | Yes. |
 | `server_error` / `upstream_unreachable` | `fm serve` is not running. | After you start it. |
 
 ## Limits

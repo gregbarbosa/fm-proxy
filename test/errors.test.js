@@ -5,8 +5,7 @@ const { startStack, request, postChat } = require("./helpers");
 
 // ── Error classification ────────────────────────────────────────────────────
 // The proxy must distinguish fm serve's two mid-stream failure modes so clients can
-// branch: rate-limit (retry) vs safety-guardrail abort (terminal). See fm-proxy.js
-// header comment.
+// branch: rate-limit (retry) vs safety-guardrail abort (terminal). See src/errors.js.
 
 test("classifyError: safety-guardrail abort is terminal and typed", () => {
   const c = classifyError("The model's safety guardrails were triggered.");
@@ -22,36 +21,8 @@ test("classifyError: LanguageModelError -1 is a retryable rate-limit", () => {
   assert.strictEqual(c.retry, true);
 });
 
-// tool_choice:"required" (or forcing a specific function) crashes fm serve's `system`
-// engine with the IDENTICAL LanguageModelError -1 signature used for rate-limiting
-// (verified live — see memory beta3-tool-choice-required-crash / beta3-audit-remaining-
-// tests). It's a deterministic, permanent client-request-shape bug, not transient, and
-// so classifyError must check the original
-// request (model + tool_choice) to avoid retry-looping a permanent bug for ~19.5s
-// before mislabeling it as rate_limit_exceeded.
-
-// Beta 3/4 also produced LanguageModelError -1 for a forced tool_choice, so the proxy
-// used to reclassify it by inspecting the request. Beta 5 has its own wording for that,
-// which means this signature can now only be a genuine rate limit — including on a
-// request that happens to force a tool call. Reclassifying it here would skip the retry
-// that recovers it.
-test("classifyError: LanguageModelError -1 stays a retryable rate-limit even with a forced tool_choice", () => {
-  const c = classifyError("LanguageModelError -1");
-  assert.strictEqual(c.type, "rate_limit_exceeded");
-  assert.strictEqual(c.retry, true);
-});
-
-test("classifyError: a plain LanguageModelError -1 classifies as a normal rate-limit", () => {
-  assert.strictEqual(classifyError("LanguageModelError -1").type, "rate_limit_exceeded");
-  assert.strictEqual(classifyError("LanguageModelError -1", { model: "system" }).type, "rate_limit_exceeded");
-});
-
-test("classifyError: called without a parsedReq argument (backward compatible) still classifies as rate-limit", () => {
-  assert.strictEqual(classifyError("LanguageModelError -1").type, "rate_limit_exceeded");
-});
-
 test("classifyError: 'Failed to parse generated content' is deterministic — no retry", () => {
-  // Beta 4's stricter tool-call parser rejects malformed generated arguments with
+  // fm serve's tool-call parser rejects malformed generated arguments with
   // this message. Verified live to be deterministic for a given request (5/5
   // identical failures) — retrying burned ~35s through the full backoff ladder
   // before surfacing. Must be terminal, and typed server_error (it is not the
@@ -215,7 +186,7 @@ test("rate-limit error frame (pre-commit) is surfaced as rate_limit_exceeded", a
 });
 
 test("an upstream HTTP 400 (unknown model) is surfaced as invalid_request_error without retrying", async () => {
-  // Reproduces the live Beta 7 failure: fm serve rejects an unknown model in ~7ms
+  // fm serve rejects an unknown model in ~7ms
   // with HTTP 400 + {error:{type:'invalid_request_error',code:'400'}}. The proxy
   // used to run the full 1+2+4+8s backoff ladder and then answer
   // server_error/internal_error. It must surface the 400 as a terminal

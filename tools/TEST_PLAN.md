@@ -10,7 +10,7 @@ Three layers. Run them in order. Each catches what the layer above cannot.
 
 ## Layer 1 — unit and integration
 
-`npm test`. Expect **166 pass, 0 fail**. Without `fm`, as on a CI runner, expect 164 pass
+`npm test`. Expect **174 pass, 0 fail**. Without `fm`, as on a CI runner, expect 172 pass
 and 2 skipped.
 
 A skipped test means the `fm` CLI is unavailable. Check the licence with `fm license
@@ -91,19 +91,18 @@ once before you investigate.
 If several unrelated checks fail at once, suspect a poisoned server rather than the
 code: a cyclic `$defs` request hangs `fm serve` and it answers nothing afterwards. The proxy
 now rejects those before they are forwarded, but a direct request still does it.
-Restart `fm serve` and re-run. On 27.2 Beta 2 the hang sits below `fm serve`, so a
-restart does not clear it. Poll a control request instead; it passed about 2 minutes
-after one cyclic request.
+On 27.2 a cyclic request generates for about 2 minutes and then fails with context
+exceeded. Poll a control request until it passes.
 
-Expect the first request after that restart to take about 25 seconds while the model
+Expect the first request after a restart of `fm serve` to take about 25 seconds while the model
 reloads. Do not read the delay as a second failure.
 
 `com.apple.SensitiveContentAnalysisML error 15` is a different fault, and it is
 environmental. Every request fails fast, including `fm respond`, so the fault sits below
 `fm serve` and no restart of `fm serve` reaches it. It appears on a machine that is still
-settling after an OS update, and it clears itself: on the 27.0 RC it cleared in about 20
-to 30 minutes with no intervention. Wait before you investigate. An experiment on the RC
-ruled out both the cyclic hang and a stop of `fm serve` as causes.
+settling after an OS update, or after repeated runaway generations, and it clears
+itself in less than a minute to about 30 minutes. Wait before you investigate. The proxy
+returns it at once as `model_service_unavailable`.
 
-Note that `fm available` reports "System model available" throughout that fault. It is not
-a health check. Test health with a real inference request.
+Note that `fm models` reports the system model as available throughout that fault. It is
+not a health check. Test health with a real inference request.

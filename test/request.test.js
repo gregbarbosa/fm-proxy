@@ -6,18 +6,11 @@ const { truncateAtStop } = require("../src/text");
 const { startStack, request, rewriteBody } = require("./helpers");
 
 // ── function.description backfill ──────────────────────────────────────────
-// fm serve (Beta 3 / fm 2.0.59, verified live) 400s EVERY tool-calling request —
-// regardless of parameters shape, tool_choice, or which tool the model actually
-// calls — with "Invalid JSON: The data couldn't be read because it is missing."
-// whenever ANY tool in the array has function.description absent or null. An
-// empty string ("") is accepted. This was originally misdiagnosed as an
-// empty-parameters bug (see memory beta3-tool-choice-required-crash's caveat)
-// because a minimal no-arg test tool naturally omits `description` too — but a
-// non-empty-parameters tool with no description hits the identical 400, and a
-// no-parameters tool WITH a description (even "") works fine. OpenAI's
-// tool-calling spec makes `description` optional, so a compliant client can
-// send exactly the shape that breaks fm serve. Fix: fixTools backfills a
-// missing/null description to "" before forwarding.
+// fm serve 400s every tool-calling request with "Invalid JSON: The data couldn't be
+// read because it is missing." when any tool has function.description absent or
+// null. An empty string is accepted. OpenAI makes `description` optional, so a
+// compliant client can send exactly this shape. fixTools backfills "" before
+// forwarding.
 test("fixTools backfills a missing function.description to empty string", () => {
   const { body } = rewriteBody(JSON.stringify({
     tools: [{ type: "function", function: { name: "foo", parameters: { type: "object", properties: {} } } }],
