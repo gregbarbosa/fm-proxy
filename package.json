@@ -14,7 +14,7 @@
   ],
   "scripts": {
     "start": "./fm-launch.sh",
-    "test": "node --test test/"
+    "test": "node --test test/*.test.js"
   },
   "engines": {
     "node": ">=18"
