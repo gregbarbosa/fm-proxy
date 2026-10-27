@@ -45,13 +45,13 @@ reference carries them in the discussion block. Root help's MODELS section lists
 `fm --version` does **not** exist (errors "Unknown option"). To detect when Apple ships a
 new `fm`/FoundationModels build across macOS betas, fingerprint the binary:
 
-| What | How | Beta 2 value | Beta 3 value | Beta 4 value | Beta 5 value | Beta 6 value | Beta 7 value | Beta 8 value | 27.0 RC | 27.2 Beta | 27.2 Beta 2 |
-|---|---|---|---|---|---|---|---|---|---|---|---|
-| fm source version | `otool -l /usr/bin/fm \| grep -A2 LC_SOURCE_VERSION` | `2.0.55.1.402` | `2.0.59` | `2.0.62.1.402` | `2.0.68.1.401` | `2.0.68.1.401` | `2.0.68.1.402` | `2.0.68.1.402` | `2.0.68.1.402` | `2.1.7.1.901` | `2.1.8.1.900` |
-| Framework version | `plutil -p /System/Library/Frameworks/FoundationModels.framework/Resources/Info.plist \| grep CFBundleVersion` | `2.0.55.1.402` | `2.0.59` | `2.0.62.1.402` | `2.0.68.1.401` | `2.0.68.1.401` | `2.0.68.1.402` | `2.0.68.1.402` | `2.0.68.1.402` | `2.1.7.1.901` | `2.1.8.1.900` |
-| Runtime version | `codesign -dvvv /usr/bin/fm` → `Runtime Version=` | `27.0.0` | `27.0.0` | `27.0.0` | `27.0.0` | `27.0.0` | `27.0.0` | `27.0.0` | `27.0.0` | `27.2.0` | `27.2.0` |
-| Rebuild date | `ls -la /usr/bin/fm` (mtime) | Jun 19 2026 | Jul 3 2026 | Jul 17 2026 | Aug 7 2026 | Aug 14 2026 | Aug 21 2026 | Aug 27 2026 | Sep 3 2026 | Sep 13 2026 | Sep 19 2026 |
-| macOS build | `sw_vers` → `BuildVersion` | `26A5368g` (27.0 Beta 2) | `26A5378j` (27.0 Beta 3) | `26A5388g` (27.0 Beta 4) | `26A5406e` (27.0 Beta 5) | `26A5416b` (27.0 Beta 6) | `26A5421a` (27.0 Beta 7) | `26A5425a` (27.0 Beta 8) | `26A428` (27.0 RC) | `26B5086k` (27.2 Beta) | `26B5091g` (27.2 Beta 2) |
+| What | How | Beta 2 value | Beta 3 value | Beta 4 value | Beta 5 value | Beta 6 value | Beta 7 value | Beta 8 value | 27.0 RC | 27.2 Beta | 27.2 Beta 2 | 27.2 `26B118` | 27.2 RC |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| fm source version | `otool -l /usr/bin/fm \| grep -A2 LC_SOURCE_VERSION` | `2.0.55.1.402` | `2.0.59` | `2.0.62.1.402` | `2.0.68.1.401` | `2.0.68.1.401` | `2.0.68.1.402` | `2.0.68.1.402` | `2.0.68.1.402` | `2.1.7.1.901` | `2.1.8.1.900` | `2.1.14` | `2.1.14` |
+| Framework version | `plutil -p /System/Library/Frameworks/FoundationModels.framework/Resources/Info.plist \| grep CFBundleVersion` | `2.0.55.1.402` | `2.0.59` | `2.0.62.1.402` | `2.0.68.1.401` | `2.0.68.1.401` | `2.0.68.1.402` | `2.0.68.1.402` | `2.0.68.1.402` | `2.1.7.1.901` | `2.1.8.1.900` | `2.1.14` | `2.1.14` |
+| Runtime version | `codesign -dvvv /usr/bin/fm` → `Runtime Version=` | `27.0.0` | `27.0.0` | `27.0.0` | `27.0.0` | `27.0.0` | `27.0.0` | `27.0.0` | `27.0.0` | `27.2.0` | `27.2.0` | `27.2.0` | `27.2.0` |
+| Rebuild date | `ls -la /usr/bin/fm` (mtime) | Jun 19 2026 | Jul 3 2026 | Jul 17 2026 | Aug 7 2026 | Aug 14 2026 | Aug 21 2026 | Aug 27 2026 | Sep 3 2026 | Sep 13 2026 | Sep 19 2026 | Oct 16 2026 | Oct 22 2026 |
+| macOS build | `sw_vers` → `BuildVersion` | `26A5368g` (27.0 Beta 2) | `26A5378j` (27.0 Beta 3) | `26A5388g` (27.0 Beta 4) | `26A5406e` (27.0 Beta 5) | `26A5416b` (27.0 Beta 6) | `26A5421a` (27.0 Beta 7) | `26A5425a` (27.0 Beta 8) | `26A428` (27.0 RC) | `26B5086k` (27.2 Beta) | `26B5091g` (27.2 Beta 2) | `26B118` (27.2) | `26B123` (27.2 RC) |
 
 New fingerprint dimension on the 27.2 beta: `fm respond --model system --show-assets`
 prints the exact asset bundles behind each inference — on `26B5086k` that is
@@ -98,19 +98,21 @@ Audit recipe after any OS update:
 2. **Behaviour** — the help tree can stay identical while behaviour changes, and the
    reverse also happens, so re-test the known walls separately. Run the three test
    layers in `tools/TEST_PLAN.md`, then re-check by hand:
-   - tool calling — still broken upstream (`tool_calls` never populated)
+   - tool calling — works natively on 26B123. Check that `tool_calls` is still populated,
+     on both paths. Up to 27.2 Beta 2 it never was
    - `$defs` in `response_format` — an entry with no `title` 400s; a **cyclic** one
-     hangs the model service, so test it last and wait for a control request to pass
-   - forced `tool_choice` — raw `fm serve` still answers 500 "unsupported generation
-     guide". Through the proxy it must return a real `tool_call`: forced dispatch now
-     depends on `response_format` and constrained decoding continuing to work, so if
-     Apple breaks those, forced tool calling breaks silently.
-     `node tools/deviation-probe.js 1977` check 6 covers this.
+     hung the model service up to 27.2 Beta 2 and ran for about 2 minutes on 26B123, so
+     test it last and wait for a control request to pass
+   - forced `tool_choice` — raw `fm serve` returns a real `tool_call` on 26B123. Up to
+     27.2 Beta 2 it answered 500 "unsupported generation guide". Through the proxy it
+     must return a real `tool_call`: forced dispatch depends on `response_format` and
+     constrained decoding continuing to work, so if Apple breaks those, forced tool
+     calling breaks silently. `node tools/deviation-probe.js 1977` check 6 covers this.
    - a tool with no `function.description` — 400s the whole request
    - omitted `stream` — returns SSE, not JSON
    - `n > 1` — 400s
    - prompt framing — `hello world` should be 57 `prompt_tokens`
-   - the 4096-token window — a ~4056-token prompt passes, ~8056 does not
+   - the 4096-token window — a ~4005-token prompt passes, ~4150 does not
    - tool-call content — check the reply text for `<start_of_turn>` and `<ctrl NN>`
      markers, and for a bare `{"tool_call": ...}` object. Send at least 10 requests,
      because the leak is intermittent
@@ -150,6 +152,8 @@ authoritative for what is true now.
 | RC `26A428` | 2.0.68.1.402 | Rebuilt binary, identical CLI surface. The RC audit found the tool-call marker leak. A clean-room record shows Beta 7 leaked too. |
 | 27.2 Beta `26B5086k` | 2.1.7.1.901 | **PCC model returned**, gated to Terminal.app contexts, with `fm quota-usage` restored and `fm available` renamed `fm models`. New `--model-provider` / `--model-provider-header` routing with a `fm config` tree; `fm serve` routes non-built-in models upstream. Licence bumped to `FM1 version 1.1`, same operative clause. Audit: every known wall holds (tool calling, cyclic hang, framing 57, window 4096, 400s); marker leak persists; forced dispatch still works. PCC fails in this seed: modelmanagerd cannot read fm's inference entitlement at runtime, so `systemNotReady` is deterministic, not settling. |
 | 27.2 Beta 2 `26B5091g` | 2.1.8.1.900 | Identical CLI surface, licence and model asset IDs. **PCC works from Terminal.app**, direct and through the proxy, with a window of about 32k: the entitlement fault is fixed. `$defs` entries no longer need `x-order` or `additionalProperties`. A cyclic `$defs` now hangs the model service below `fm serve` for about 2 minutes, and a restart of `fm serve` does not clear it. Tool-call content moved mostly to bare `{"tool_call": ...}` JSON, with markers in 1 of 20 replies. Every other wall holds. No proxy code change. |
+| 27.2 `26B118` | 2.1.14 | Not audited. Fingerprint only, read 2026-10-22. |
+| 27.2 RC `26B123` | 2.1.14 | Rebuilt binary with the same `fm` version as `26B118`. Licence and model asset IDs unchanged since Beta 2. Three `fm chat` screen-reader options arrived in `26B118` or `26B123`; the audit cannot tell which. **Native tool calling works**: auto and forced both populate `tool_calls`, on both paths, with no marker or bare-JSON leak in 20 of 20. A cyclic `$defs` no longer hangs the service; it generates for about 2 minutes and fails with context exceeded. Every other wall holds. No proxy code change. |
 
 Beta 7, Beta 8 and the RC shared `fm` 2.0.68.1.402 and a byte-identical help tree, so
 only the binary's mtime distinguished them. The 27.2 beta broke that streak with a

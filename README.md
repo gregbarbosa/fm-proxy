@@ -28,7 +28,7 @@ corrects those departures. It has no dependencies.
 
 ## Requirements
 
-- macOS 27.0 Beta 7 or later. Last tested on macOS 27.2 Beta 2 (`26B5091g`).
+- macOS 27.0 Beta 7 or later. Last tested on macOS 27.2 RC (`26B123`).
 - Apple Intelligence enabled, with an Apple Account signed in.
 - Node.js 18 or later.
 - The accepted `fm` licence. Run `sudo fm license` once. Until you do, every `fm`
@@ -82,10 +82,13 @@ Private Cloud Compute quota; `GET /health` reports it.
 | Structured output (`response_format` with a JSON schema), including `$defs` and `$ref` | Works |
 | Images, as a base64 `data:` URL in an `image_url` part | Works |
 | Forced tool calls (`tool_choice: "required"` or a named function) | Works, through a translation |
-| `tool_choice: "auto"` | **Broken upstream.** `tool_calls` is never set. |
+| `tool_choice: "auto"` | Works on 27.2 RC (`26B123`). Broken upstream on earlier builds: `tool_calls` is never set. |
 | CORS, `GET /v1/models`, `GET /health` | Works |
 
 ### Tool calling
+
+On 27.2 RC (`26B123`), `fm serve` sets `tool_calls` for auto and forced calls, and the
+proxy passes them through. The rest of this section applies to earlier builds.
 
 `fm serve` never sets `tool_calls`. The model picks the correct tool and arguments, but
 they arrive as text in `content`, often as `{"tool_call": [...]}` JSON and sometimes

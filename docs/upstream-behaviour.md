@@ -6,26 +6,26 @@ version for a user.
 
 ## Current behaviour
 
-Audited 2026-09-22 against a live `fm serve` on `system`, build `26B5091g` (27.2 Beta 2),
-`fm` 2.1.8.1.900. This table is the single statement of what `fm serve` does; do not
+Audited 2026-10-27 against a live `fm serve` on `system`, build `26B123` (27.2 RC),
+`fm` 2.1.14. This table is the single statement of what `fm serve` does; do not
 re-derive it from the release history in `docs/audit.md`.
 
 | Behaviour | What `fm serve` does |
 |---|---|
-| Tool calling | Never populates `tool_calls`. `finish_reason` is `stop`. |
-| Tool-call content | Puts the call in `content`, as bare JSON or with raw chat-template markers. See below. |
-| Forced `tool_choice` | `500 An unsupported generation guide was used.` on a non-streaming request. On an SSE request the failure arrives as an `event: error` frame under HTTP 200 instead. The proxy routes around it either way. |
+| Tool calling | Works natively. `tool_calls` is populated and `finish_reason` is `tool_calls`, on both paths. Earlier builds never populated it; see "Native tool calling on 26B123". |
+| Tool-call content | Clean. 0 of 20 replies carried markers or bare `{"tool_call": ...}` JSON. |
+| Forced `tool_choice` | Works natively on both paths. `required` and a named function each return a real `tool_call`. Earlier builds answered `500 An unsupported generation guide was used.` |
 | Tool with no `function.description` | `400` for the whole request |
 | `stream` omitted | Returns `text/event-stream`, not one JSON object |
 | `n > 1` | `400 n=2 is not supported.` |
 | `parallel_tool_calls` | Accepted, then ignored |
 | `max_tokens` | Ignored. The proxy truncates. |
 | Prompt framing | `hello world` is 57 `prompt_tokens` |
-| Context window | 4096 tokens. 4005 passes, ~4150 overflows. |
+| Context window | 4096 tokens. 4008 passes, ~4150 overflows. |
 | `$defs` + dialect, non-cyclic | `200` in one to three seconds |
 | `$defs` entry with `title` and `required`, no `x-order` or `additionalProperties` | `200`. Objects nested in the entry need no keys. |
 | `$defs` entry with no `title` | `400` naming `undefinedReferences` |
-| `$defs`, **cyclic** | Can return `200` when the model stops the recursion early. A prompt that makes it recurse hangs the model service below `fm serve`: every request fails, `fm respond` included, and a restart of `fm serve` does not help. It cleared by itself about 2 minutes after one cyclic request. |
+| `$defs`, **cyclic** | No longer hangs the service. A prompt that makes it recurse generates for about 2 minutes (114 s measured), then fails with `500` context exceeded. A control request passed 2 s later. On 27.2 Beta 2 the same request hung the model service for about 2 minutes. |
 | Titled string schema | `400` unless it carries a non-empty `enum` |
 | `array<array<object>>` tool param | Accepted natively |
 | Vision | Real image understanding. A 256 px PNG costs 131 `prompt_tokens`. |
@@ -42,7 +42,8 @@ local research. Read it with `fm license --show` and check it with `fm license
 --status`; both print without prompting, once a privileged user has accepted it.
 Acceptance survives an OS update, but a version bump makes the user re-accept — expect
 one `sudo fm license` after each such update. Beta 2 kept `FM1 version 1.1` and the same
-clause, so the Beta 1 acceptance still holds.
+clause, so the Beta 1 acceptance still holds. 26B123 also kept `FM1 version 1.1` and the
+same text, so the acceptance of 2026-09-18 still holds.
 
 ### Private Cloud Compute on 27.2 Beta 2
 
@@ -56,14 +57,35 @@ Measured 2026-09-22 with `fm serve` launched from Terminal.app. The proxy needs 
 | Context window | About 32k. 31,555 passes, ~33,055 overflows with `context_length_exceeded`. |
 | Large prompts | Can fail with `LanguageModelError error -1` and succeed on a later try. It happened at 24k and 30k while 31.5k passed. Read it as a rate limit, as on 27.0. |
 | Streaming | Works through the proxy, with one usage frame |
-| Tool calling, auto | Never populates `tool_calls`. Markers leaked in 7 of 10 replies. |
-| Forced `tool_choice`, raw | `200`, but the model ignores it and answers in prose |
+| Tool calling, auto | Never populates `tool_calls`. Markers leaked in 7 of 10 replies. On 26B123 it returns a real `tool_call` (1 of 1). |
+| Forced `tool_choice`, raw | `200`, but the model ignores it and answers in prose. On 26B123 it returns a real `tool_call` (1 of 1). |
 | Forced `tool_choice`, via proxy | A real `tool_call` with valid arguments |
 | `n > 1` | `400`, as on `system` |
 | `reasoning_effort` | Used. `low`, `medium`, and `high` are accepted; any other value 400s. The reasoning is hidden: `content` does not change and `reasoning_tokens` reads 0, but `completion_tokens` counts it. One prompt, twice each: none 11 tokens in 0.7 s, `low` 121 in 1.4 s, `high` 225 in 2.1 s. The proxy forwards it. On `system`, `fm serve` 400s the field, so the proxy removes it there. |
 
 Caution: every `pcc` request uses the account's Private Cloud Compute quota. Keep probes
 few, and check the `quota` object in `/health` before a long run.
+
+### Native tool calling on 26B123
+
+Measured 2026-10-27 on `26B123`, direct to `fm serve` unless stated.
+
+| Check | Result |
+|---|---|
+| Auto, two prompts, one tool | 20 of 20 populated `tool_calls`. 0 markers, 0 bare JSON. |
+| Auto, a prompt that needs no tool | Prose in 4 of 5. One reply called the tool. |
+| Auto, two tools, a prompt that needs both | Two calls, each routed to the right tool |
+| `parallel_tool_calls: false` | Still ignored: the same prompt returned two calls |
+| Round trip with a `tool` result message | `200`, a prose answer that uses the result |
+| Auto, streaming | One `tool_calls` delta, then `finish_reason: tool_calls` |
+| Forced `required`, non-streaming and streaming | A real `tool_call`. 254 prompt tokens. |
+| Forced named function, two tools offered | Called the named function |
+| Through the proxy, auto, 10 JSON and 10 SSE | 20 of 20 real calls with valid JSON arguments. 0 leaks. |
+| Through the proxy, forced | Still translated by `buildToolDispatch`. A real call, 111 prompt tokens. |
+
+The proxy forwards auto unchanged, so auto tool calling works through it on this build
+with no code change. The forced translation still works too, but `fm serve` no longer
+needs it on this build. The sections below record the earlier builds.
 
 ### Tool-call replies leak chat-template markers
 
@@ -112,7 +134,7 @@ hold-back buffer is needed.
 
 ### Forced tool calling works, through a schema
 
-`fm serve` never populates `tool_calls`, and it rejects a forced `tool_choice` with
+Up to 27.2 Beta 2, `fm serve` never populates `tool_calls`, and it rejects a forced `tool_choice` with
 `500 An unsupported generation guide was used.` It does honour `response_format`, so the
 proxy translates a forced call instead of forwarding it.
 
@@ -350,5 +372,6 @@ pydantic, zod-to-json-schema, and TypeBox all emit `$defs`/`$ref` for named type
 ordinary client would otherwise get a `400`.
 
 Warning: a cyclic `$defs` has no finite inline form, and forwarding one can hang the
-model service. The proxy rejects it with `400` `cyclic_schema` before it opens an upstream
+model service on 27.2 Beta 2 and earlier. On 26B123 it ties up the service for about 2
+minutes instead. The proxy rejects it with `400` `cyclic_schema` before it opens an upstream
 connection.
