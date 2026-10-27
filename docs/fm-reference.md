@@ -68,6 +68,9 @@ Start an interactive multi-turn conversation. Sessions are automatically saved t
 | `--instructions, -i <instructions>` | Instructions for the model |
 | `--tool <tool>` | Built-in tool to enable (repeatable). Known: barcode, ocr. |
 | `--set-default-model <set-default-model>` | Persist <model> as the default for future fm chat sessions |
+| `--set-ax-screen-reader, --set-no-ax-screen-reader` |  |
+| `--ax-screen-reader, --no-ax-screen-reader` | Render output for a screen reader: plain lines, no animation or cursor redrawing |
+| `--set-ax-bell <set-ax-bell>` | Persist whether screen reader mode rings the bell when a slow turn finishes |
 | `-h, --help` | Show help information. |
 
 ## `fm count-tokens`
