@@ -1,9 +1,9 @@
 // Relays one non-streaming chat completion. The whole reply is buffered first, so a
 // transient failure can still be retried.
-const { classifyError, isErrorPayload, typedError } = require("./errors");
+const { classifyError, errorStatus, UPSTREAM_CLOSED, isErrorPayload, typedError } = require("./errors");
 const { dispatchToToolCalls } = require("./dispatch");
 const { truncateAtStop } = require("./text");
-const { relayHead, writeSseHead, diag, logToks } = require("./http");
+const { relayHead, writeSseHead, writeJsonError, diag, logToks } = require("./http");
 
 // Tool-call arguments go out in pieces of this size, as OpenAI streams them.
 const ARG_CHUNK = 64;
@@ -45,6 +45,8 @@ function fixReply(obj, ctx) {
     if (hit) {
       msg.content = text;
       obj.choices[0].finish_reason = "stop";
+      // The reply ended at the stop sequence, whatever fm serve generated after it.
+      return;
     }
   }
   applyLengthFinish(obj, ctx.cappedAt);
@@ -80,17 +82,20 @@ function emitSynthesisedStream(res, obj, status, model) {
   res.end();
 }
 
-function emitErrorStream(res, error, status) {
-  writeSseHead(res, status);
-  res.write(`data: ${JSON.stringify({ error })}\n\n`);
-  res.write("data: [DONE]\n\n");
-  res.end();
-}
-
 function relayNonStreamingChat({ res, proxyRes, gate, ctx, reqStart }) {
   let raw = "";
+  let ended = false;
   proxyRes.on("data", (c) => (raw += c));
+  // A reset connection emits no `end`.
+  proxyRes.on("close", () => {
+    if (ended || gate.isAborting() || res.headersSent || res.destroyed) return;
+    diag(UPSTREAM_CLOSED.label, `(non-stream) — ${raw.length} bytes received`);
+    if (gate.fail("upstream closed")) return;
+    gate.markCommitted();
+    writeJsonError(res, 502, typedError(UPSTREAM_CLOSED));
+  });
   proxyRes.on("end", () => {
+    ended = true;
     if (gate.isAborting()) return;
     let obj = null;
     try { obj = JSON.parse(raw); } catch { /* not JSON: relay as it is */ }
@@ -106,9 +111,7 @@ function relayNonStreamingChat({ res, proxyRes, gate, ctx, reqStart }) {
         diag(`${cls.label} (non-stream)`, `— ${raw.slice(0, 200)}`);
         if (cls.retry && gate.fail("non-stream error")) return;
         if (typeof obj.error === "object") obj.error = typedError(cls, obj.error.message);
-        // fm serve sends some request errors, such as an overflow, as a 500. The OpenAI
-        // SDKs retry a 5xx, and that re-sends a request that cannot succeed.
-        if (cls.type === "invalid_request_error" && status === 500) status = 400;
+        status = errorStatus(cls, status);
       }
     } else if (obj) {
       fixReply(obj, ctx);
@@ -116,9 +119,9 @@ function relayNonStreamingChat({ res, proxyRes, gate, ctx, reqStart }) {
 
     logToks(ctx.model, "sync", (obj && obj.usage && obj.usage.completion_tokens) || 0, Date.now() - reqStart);
     gate.markCommitted();
-    if (ctx.dispatchStreamOut && obj) {
-      if (isErrorPayload(obj)) emitErrorStream(res, obj.error, status);
-      else emitSynthesisedStream(res, obj, status, ctx.model);
+    // An error is sent as JSON even when the client asked for SSE, as OpenAI does.
+    if (ctx.dispatchStreamOut && obj && !isErrorPayload(obj)) {
+      emitSynthesisedStream(res, obj, status, ctx.model);
       return;
     }
     const out = obj ? JSON.stringify(obj) : raw;

@@ -36,7 +36,7 @@ function collapseTypeArray(node) {
 }
 
 // allOf merges its branches, and sibling keys win. anyOf and oneOf take the first typed
-// branch, and sibling keys fill the gaps.
+// branch that is not null, and sibling keys fill the gaps.
 function flattenComposite(prop, key, mergeAll) {
   const subs = prop[key] || [];
   let merged;
@@ -45,7 +45,8 @@ function flattenComposite(prop, key, mergeAll) {
     for (const sub of subs) if (sub && typeof sub === "object") Object.assign(merged, sub);
     for (const [k, v] of Object.entries(prop)) if (k !== key) merged[k] = v;
   } else {
-    const base = subs.find((s) => s && typeof s === "object" && s.type) || subs[0] || { type: "string" };
+    const typed = (s) => s && typeof s === "object" && s.type;
+    const base = subs.find((s) => typed(s) && s.type !== "null") || subs.find(typed) || subs[0] || { type: "string" };
     merged = { ...base };
     for (const [k, v] of Object.entries(prop)) if (k !== key && !(k in merged)) merged[k] = v;
   }

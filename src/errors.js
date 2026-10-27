@@ -59,6 +59,19 @@ function isErrorPayload(obj) {
   return !!(obj && obj.error && !(obj.choices && obj.choices.length));
 }
 
+// The HTTP status for an error that reaches the client before any output. fm serve sends
+// some request errors, such as an overflow, as a 500, and an OpenAI SDK retries a 5xx.
+function errorStatus(cls, upstreamStatus) {
+  if (cls.type === "invalid_request_error")
+    return upstreamStatus >= 400 && upstreamStatus !== 500 ? upstreamStatus : 400;
+  if (cls.type === "rate_limit_exceeded") return 429;
+  return upstreamStatus >= 500 ? upstreamStatus : 500;
+}
+
+// fm serve reset the connection before the reply ended.
+const UPSTREAM_CLOSED = { type: "server_error", code: "upstream_closed", retry: true,
+  label: "UPSTREAM CLOSED", clientMessage: "fm serve closed the connection before the reply ended" };
+
 function typedError(cls, msg) {
   return { message: cls.clientMessage || msg || "upstream error", type: cls.type, code: cls.code };
 }
@@ -67,4 +80,4 @@ function errorFrame(cls, msg) {
   return `data: ${JSON.stringify({ error: typedError(cls, msg) })}\n\n`;
 }
 
-module.exports = { classifyError, isErrorPayload, typedError, errorFrame };
+module.exports = { classifyError, errorStatus, UPSTREAM_CLOSED, isErrorPayload, typedError, errorFrame };

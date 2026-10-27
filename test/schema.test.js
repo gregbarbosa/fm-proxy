@@ -612,3 +612,9 @@ test("response_format: a nullable anyOf collapses to its one real branch", () =>
   assert.deepStrictEqual(out.properties.addr, { type: "object", title: "Addr", properties: { s: { type: "string" } } });
   assert.strictEqual(out.properties.either.anyOf.length, 3, "a real union is left alone");
 });
+
+test("a tool anyOf with null first keeps the real type", () => {
+  const out = fixToolSchema({ type: "object", properties: {
+    note: { anyOf: [{ type: "null" }, { type: "string" }], description: "a note" } } });
+  assert.deepStrictEqual(out.properties.note, { type: "string", description: "a note" });
+});

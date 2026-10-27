@@ -203,3 +203,66 @@ test("non-streaming: a retryable upstream 500 still ends as a 500", async () => 
     assert.strictEqual(res.status, 500, res.body);
   } finally { await stack.stop(); }
 });
+
+// The Python SDK sends an explicit None as null. Number(null) is 0, so the cap became 0.
+test("max_tokens: null and max_completion_tokens: null set no cap", async () => {
+  for (const field of ["max_tokens", "max_completion_tokens"]) {
+    const stack = await startStack({
+      handler: (req, parsed, res) => {
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(JSON.stringify({ id: "c", object: "chat.completion", model: "system",
+          choices: [{ index: 0, message: { role: "assistant", content: "ok" }, finish_reason: "stop" }],
+          usage: { prompt_tokens: 5, completion_tokens: 1, total_tokens: 6 } }));
+      },
+    });
+    try {
+      const res = await request(stack.proxyPort,
+        { method: "POST", path: "/v1/chat/completions", headers: { "content-type": "application/json" } },
+        JSON.stringify({ model: "system", stream: false, [field]: null, messages: [{ role: "user", content: "hi" }] }));
+      const sent = stack.getLastBody();
+      assert.ok(!(field in sent) && !("max_completion_tokens" in sent), `${field}: sent ${JSON.stringify(sent)}`);
+      assert.strictEqual(JSON.parse(res.body).choices[0].finish_reason, "stop", `${field}: ${res.body}`);
+    } finally { await stack.stop(); }
+  }
+});
+
+// fm serve never sees `stop`, so it often runs on to the cap after the stop text.
+test("a matched stop sequence reports stop, not length, at the cap (non-streaming)", async () => {
+  const stack = await startStack({
+    handler: (req, parsed, res) => {
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify({ id: "c", object: "chat.completion", model: "system",
+        choices: [{ index: 0, message: { role: "assistant", content: "one two END three four" }, finish_reason: "stop" }],
+        usage: { prompt_tokens: 5, completion_tokens: 50, total_tokens: 55 } }));
+    },
+  });
+  try {
+    const res = await request(stack.proxyPort,
+      { method: "POST", path: "/v1/chat/completions", headers: { "content-type": "application/json" } },
+      JSON.stringify({ model: "system", stream: false, max_tokens: 50, stop: ["END"], messages: [{ role: "user", content: "hi" }] }));
+    const ch = JSON.parse(res.body).choices[0];
+    assert.strictEqual(ch.message.content, "one two ");
+    assert.strictEqual(ch.finish_reason, "stop");
+  } finally { await stack.stop(); }
+});
+
+test("a matched stop sequence reports stop, not length, at the cap (streaming)", async () => {
+  const stack = await startStack({
+    handler: (req, parsed, res) => {
+      res.writeHead(200, { "content-type": "text/event-stream" });
+      const f = (o) => res.write(`data: ${JSON.stringify(o)}\n\n`);
+      f({ id: "c", choices: [{ index: 0, delta: { content: "one two END three" } }] });
+      f({ id: "c", choices: [{ index: 0, delta: {}, finish_reason: "stop" }] });
+      f({ id: "c", choices: [], usage: { prompt_tokens: 5, completion_tokens: 50, total_tokens: 55 } });
+      res.end("data: [DONE]\n\n");
+    },
+  });
+  try {
+    const res = await request(stack.proxyPort,
+      { method: "POST", path: "/v1/chat/completions", headers: { "content-type": "application/json" } },
+      JSON.stringify({ model: "system", stream: true, max_tokens: 50, stop: ["END"], messages: [{ role: "user", content: "hi" }] }));
+    const fins = [...res.body.matchAll(/"finish_reason":"(\w+)"/g)].map((m) => m[1]);
+    assert.deepStrictEqual(fins, ["stop"], res.body);
+    assert.ok(!res.body.includes("three"), res.body);
+  } finally { await stack.stop(); }
+});

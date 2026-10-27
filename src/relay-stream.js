@@ -4,10 +4,10 @@
 // so a failure before that point can still be retried without the client seeing it.
 // The relay also applies `stop`, turns a guardrail abort into finish_reason
 // "content_filter", and ends with its own usage chunk and [DONE].
-const { classifyError, isErrorPayload, errorFrame } = require("./errors");
+const { classifyError, errorStatus, UPSTREAM_CLOSED, isErrorPayload, typedError, errorFrame } = require("./errors");
 const { countCompletionTokens } = require("./tokens");
 const { stopList, truncateAtStop } = require("./text");
-const { diag, logToks } = require("./http");
+const { writeJsonError, diag, logToks } = require("./http");
 
 // A raw line, outside `data:`, that carries one of fm serve's errors.
 const RAW_ERROR_LINE = /languagemodelerror|error -1|exceeded the model's context size/i;
@@ -23,6 +23,8 @@ function chunk(meta, fields) {
 
 function relayStreamingChat({ res, proxyRes, gate, ctx, reqStart }) {
   const { commit, isCommitted, fail, isAborting } = gate;
+  let ended = false;            // upstream's `end` arrived
+  let done = false;             // the client already has its whole reply
   const { cappedAt, clientDeclinedUsage, promptTokensFallback } = ctx;
 
   // `stop` spans deltas, so hold back the last (longest stop - 1) characters: only they
@@ -68,7 +70,7 @@ function relayStreamingChat({ res, proxyRes, gate, ctx, reqStart }) {
     pending += s;
     let idx;
     while ((idx = pending.indexOf("\n")) !== -1 || (flush && pending.length)) {
-      if (isAborting()) return;
+      if (isAborting() || done) return;
       let line = idx !== -1 ? pending.slice(0, idx + 1) : pending;
       pending = idx !== -1 ? pending.slice(idx + 1) : "";
       const t = line.trim();
@@ -137,10 +139,16 @@ function relayStreamingChat({ res, proxyRes, gate, ctx, reqStart }) {
         sawFinish = true;
         continue;
       }
+      // Nothing has reached the client yet, so answer with an HTTP error and a JSON
+      // body, as OpenAI does, rather than an SSE stream with one error frame.
       if (isErr && !isCommitted()) {
         diag(`${errCls.label} (pre-commit)`, `— line: ${t}`);
         if (errCls.retry && fail("upstream error frame")) return;
-        meaningful = true;
+        done = true;
+        gate.markCommitted();
+        writeJsonError(res, errorStatus(errCls, proxyRes.statusCode),
+          typedError(errCls, (obj && obj.error && obj.error.message) || t));
+        return;
       }
       if (!isCommitted() && !meaningful) {
         preBuffer.push(line);
@@ -156,16 +164,37 @@ function relayStreamingChat({ res, proxyRes, gate, ctx, reqStart }) {
     }
   }
 
+  // A reset connection emits no `end`. Close the client's stream with an error frame.
+  proxyRes.on("close", () => {
+    if (ended || done || isAborting() || res.writableEnded || res.destroyed) return;
+    diag(UPSTREAM_CLOSED.label, `completionChars=${completionText.length} rawTail=${JSON.stringify(rawTail)}`);
+    if (!isCommitted()) {
+      if (fail("upstream closed")) return;
+      gate.markCommitted();
+      writeJsonError(res, 502, typedError(UPSTREAM_CLOSED));
+      return;
+    }
+    if (pendingTail && !stopHit) {
+      const meta = lastChunkMeta || {};
+      res.write(chunk(meta, { model: meta.model || ctx.model,
+        choices: [{ index: 0, delta: { content: pendingTail } }] }));
+    }
+    res.write(errorFrame(UPSTREAM_CLOSED));
+    res.write("data: [DONE]\n\n");
+    res.end();
+  });
+
   proxyRes.on("data", (c) => {
-    if (isAborting()) return;
+    if (isAborting() || done) return;
     rawTail = (rawTail + c).slice(-2000);
     pump(c, false);
   });
 
   proxyRes.on("end", () => {
-    if (isAborting()) return;
+    ended = true;
+    if (isAborting() || done) return;
     pump("", true);
-    if (isAborting()) return;
+    if (isAborting() || done) return;
     const empty = !sawFinish && completionText === "";
     if (!isCommitted()) {
       if (empty && fail("empty stream (no finish)")) return;
@@ -204,8 +233,8 @@ function relayStreamingChat({ res, proxyRes, gate, ctx, reqStart }) {
       tFirstToken != null ? tFirstToken - reqStart : null);
 
     // fm serve reports "stop" when it stopped at the cap. An abort wins over the cap, and
-    // so does a tool call: a complete call is not truncated text.
-    const cappedFinish = cappedAt != null && !abortFinishReason &&
+    // so do a tool call and a matched stop sequence: neither is truncated text.
+    const cappedFinish = cappedAt != null && !abortFinishReason && !stopHit &&
       (heldFinish == null || heldFinish === "stop") &&
       Number(usage.completion_tokens) >= Number(cappedAt) ? "length" : null;
     const finish = abortFinishReason || cappedFinish || heldFinish;

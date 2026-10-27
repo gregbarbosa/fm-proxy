@@ -93,6 +93,7 @@ const M = [{ role: "user", content: "Say hi" }];
 const CASES = [
   ["stream omitted", { model: "system", messages: M, max_tokens: 10 }],
   ["stream false", { model: "system", messages: M, max_tokens: 10, stream: false }],
+  ["max_tokens null", { model: "system", messages: M, max_tokens: null, stream: false }],
   ["stream true", { model: "system", messages: M, max_tokens: 10, stream: true }],
   ["stream true, usage declined", { model: "system", messages: M, max_tokens: 10, stream: true, stream_options: { include_usage: false } }],
   ["system message", { model: "system", messages: [{ role: "system", content: "Be brief." }, ...M], max_tokens: 10, stream: false }],

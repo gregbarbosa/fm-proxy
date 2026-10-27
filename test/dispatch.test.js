@@ -209,7 +209,7 @@ test("streaming: an unusable dispatched reply still streams as content", async (
 
 // ── a dispatched stream carries an upstream error ───────────────────────────
 
-test("streaming dispatch: an upstream error arrives as a typed error frame", async (t) => {
+test("streaming dispatch: an upstream error arrives as a typed JSON error", async (t) => {
   const stack = await startStack({ handler: (req, parsed, res) => {
     res.writeHead(400, { "content-type": "application/json" });
     res.end(JSON.stringify({ error: { message: "Unknown model 'nope'.", type: "invalid_request_error" } }));
@@ -218,14 +218,12 @@ test("streaming dispatch: an upstream error arrives as a typed error frame", asy
   const body = JSON.parse(FORCED_REQ(true));
   body.model = "nope";
   const r = await postChat(stack, JSON.stringify(body));
+  // Nothing was streamed yet, so the error is an HTTP error with a JSON body, as OpenAI does.
   assert.strictEqual(r.status, 400);
-  const frames = r.body.split("\n").filter((l) => l.startsWith("data: ") && !l.includes("[DONE]"))
-    .map((l) => JSON.parse(l.slice(6)));
-  const err = frames.find((f) => f.error);
-  assert.ok(err, "an error frame must reach the client");
+  assert.match(r.headers["content-type"], /application\/json/);
+  const err = JSON.parse(r.body);
   assert.match(err.error.message, /Unknown model 'nope'/);
   assert.strictEqual(err.error.type, "invalid_request_error");
-  assert.ok(!frames.some((f) => f.choices?.[0]?.finish_reason), "no finish_reason on an error");
 });
 
 test("streaming dispatch: the synthesised frames carry the request's model", async (t) => {

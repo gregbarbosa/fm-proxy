@@ -80,12 +80,16 @@ function prepareUpstream(req, body) {
   let cappedAt = null;
   if (isChat && parsed) {
     // fm serve ignores `max_tokens` and honours only `max_completion_tokens`.
-    if (parsed.max_completion_tokens == null && Number.isFinite(Number(parsed.max_tokens))) {
-      parsed.max_completion_tokens = Number(parsed.max_tokens);
+    // Only a number is a cap. The Python SDK sends an explicit None as null, and
+    // Number(null) is 0.
+    const isCap = (v) => typeof v === "number" && Number.isFinite(v);
+    if (parsed.max_tokens === null) delete parsed.max_tokens;
+    if (parsed.max_completion_tokens === null) delete parsed.max_completion_tokens;
+    if (!isCap(parsed.max_completion_tokens) && isCap(parsed.max_tokens)) {
+      parsed.max_completion_tokens = parsed.max_tokens;
       delete parsed.max_tokens;
     }
-    const cap = Number(parsed.max_completion_tokens);
-    if (Number.isFinite(cap)) cappedAt = cap;
+    if (isCap(parsed.max_completion_tokens)) cappedAt = parsed.max_completion_tokens;
   }
   if (isStream) {
     // fm serve sends streaming usage only on request. Clients rarely ask, so always ask.

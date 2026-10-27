@@ -476,3 +476,78 @@ test("classifyError: SensitiveContentAnalysisML error 15 is terminal", () => {
   assert.strictEqual(c.code, "model_service_unavailable");
   assert.strictEqual(c.retry, false);
 });
+
+// ── Upstream drops the connection ───────────────────────────────────────────
+// A socket reset emits no `end`. The relays waited for it, so the client hung.
+const withTimeout = (p, ms) => Promise.race([p, new Promise((_, rej) => setTimeout(() => rej(new Error(`no reply in ${ms}ms`)), ms))]);
+
+test("upstream drops mid-stream: the client gets an error frame and [DONE]", async () => {
+  const stack = await startStack({
+    handler: (req, parsed, res) => {
+      res.writeHead(200, { "content-type": "text/event-stream" });
+      res.write(`data: ${JSON.stringify({ id: "c", choices: [{ index: 0, delta: { content: "Hello" } }] })}\n\n`);
+      setTimeout(() => res.socket.destroy(), 50);
+    },
+  });
+  try {
+    const res = await withTimeout(request(stack.proxyPort,
+      { method: "POST", path: "/v1/chat/completions", headers: { "content-type": "application/json" } },
+      JSON.stringify({ model: "system", stream: true, messages: [{ role: "user", content: "hi" }] })), 3000);
+    assert.ok(res.body.includes("Hello"), res.body);
+    assert.ok(res.body.includes('"code":"upstream_closed"'), res.body);
+    assert.ok(res.body.trimEnd().endsWith("data: [DONE]"), res.body);
+  } finally { await stack.stop(); }
+});
+
+test("upstream drops before a non-streaming reply: the client gets a typed 502", async () => {
+  const stack = await startStack({
+    handler: (req, parsed, res) => {
+      res.writeHead(200, { "content-type": "application/json" });
+      res.write('{"id":"c",');
+      setTimeout(() => res.socket.destroy(), 50);
+    },
+  });
+  try {
+    const res = await withTimeout(request(stack.proxyPort,
+      { method: "POST", path: "/v1/chat/completions", headers: { "content-type": "application/json" } },
+      JSON.stringify({ model: "system", stream: false, messages: [{ role: "user", content: "hi" }] })), 3000);
+    assert.strictEqual(res.status, 502, res.body);
+    assert.strictEqual(JSON.parse(res.body).error.code, "upstream_closed");
+  } finally { await stack.stop(); }
+});
+
+// ── A terminal error before any stream output ───────────────────────────────
+// OpenAI answers a bad streaming request with an HTTP error and a JSON body, not SSE.
+test("a terminal error before the stream starts is a JSON 400, not SSE in a 500", async () => {
+  const stack = await startStack({
+    handler: (req, parsed, res) => {
+      res.writeHead(500, { "content-type": "application/json" });
+      res.end(JSON.stringify({ error: { type: "server_error", code: "500",
+        message: "The session's transcript exceeded the model's context size." } }));
+    },
+  });
+  try {
+    const res = await request(stack.proxyPort,
+      { method: "POST", path: "/v1/chat/completions", headers: { "content-type": "application/json" } },
+      JSON.stringify({ model: "system", stream: true, messages: [{ role: "user", content: "hi" }] }));
+    assert.strictEqual(res.status, 400, res.body);
+    assert.match(res.headers["content-type"], /application\/json/);
+    assert.strictEqual(JSON.parse(res.body).error.code, "context_length_exceeded");
+  } finally { await stack.stop(); }
+});
+
+test("an in-stream error frame before any output is a JSON error too", async () => {
+  const stack = await startStack({
+    handler: (req, parsed, res) => {
+      res.writeHead(200, { "content-type": "text/event-stream" });
+      res.end('data: {"error":{"type":"server_error","code":"500","message":"The session\'s transcript exceeded the model\'s context size."}}\n\n');
+    },
+  });
+  try {
+    const res = await request(stack.proxyPort,
+      { method: "POST", path: "/v1/chat/completions", headers: { "content-type": "application/json" } },
+      JSON.stringify({ model: "system", stream: true, messages: [{ role: "user", content: "hi" }] }));
+    assert.strictEqual(res.status, 400, res.body);
+    assert.strictEqual(JSON.parse(res.body).error.code, "context_length_exceeded");
+  } finally { await stack.stop(); }
+});

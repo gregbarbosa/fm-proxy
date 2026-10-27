@@ -61,6 +61,8 @@ while [[ $# -gt 0 ]]; do
     *) echo "unknown argument: $1" >&2; usage >&2; exit 2 ;;
   esac
 done
+# The proxy reads these from its environment.
+export FM_PORT PROXY_PORT FM_BIN
 
 # ── logging ──────────────────────────────────────────────────────────────────
 ts() { date '+%H:%M:%S'; }
