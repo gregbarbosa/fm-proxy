@@ -1,6 +1,6 @@
 {
   "name": "fm-proxy",
-  "version": "1.3.0",
+  "version": "2.0.0",
   "description": "An OpenAI-compatible endpoint for Apple's on-device Foundation Models (fm serve).",
   "license": "MIT",
   "repository": "github:gregbarbosa/fm-proxy",
