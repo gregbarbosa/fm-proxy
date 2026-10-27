@@ -28,7 +28,7 @@ corrects those departures. It has no dependencies.
 
 ## Requirements
 
-- macOS 27.0 Beta 7 or later. Last tested on macOS 27.2 RC (`26B123`).
+- macOS 27.2 or later. Last tested on macOS 27.2 RC (`26B123`).
 - Apple Intelligence enabled, with an Apple Account signed in.
 - Node.js 18 or later.
 - The accepted `fm` licence. Run `sudo fm license` once. Until you do, every `fm`
@@ -79,29 +79,27 @@ Private Cloud Compute quota; `GET /health` reports it.
 |---|---|
 | Chat completions, streaming and non-streaming | Works |
 | Token usage on both paths | Works |
-| Structured output (`response_format` with a JSON schema), including `$defs` and `$ref` | Works |
+| Structured output (`response_format` with a JSON schema), including `$defs`, `definitions` and `$ref` | Works |
 | Images, as a base64 `data:` URL in an `image_url` part | Works |
+| `tool_choice: "auto"` | Works |
 | Forced tool calls (`tool_choice: "required"` or a named function) | Works, through a translation |
-| `tool_choice: "auto"` | Works on 27.2 RC (`26B123`). Broken upstream on earlier builds: `tool_calls` is never set. |
+| `tool_choice: "none"` | Works |
 | CORS, `GET /v1/models`, `GET /health` | Works |
 
 ### Tool calling
 
-On 27.2 RC (`26B123`), `fm serve` sets `tool_calls` for auto and forced calls, and the
-proxy passes them through. The rest of this section applies to earlier builds.
+`auto` goes to `fm serve` unchanged, and `fm serve` returns real `tool_calls`.
 
-`fm serve` never sets `tool_calls`. The model picks the correct tool and arguments, but
-they arrive as text in `content`, often as `{"tool_call": [...]}` JSON and sometimes
-with raw template markers such as `<ctrl46>`.
+A **forced** call (`tool_choice: "required"`, or a named function) is translated into
+structured output: each tool becomes one key of a schema, and the model fills in one
+key. With five tools it picked the right tool 9 of 10 times at 142 prompt tokens.
+`fm serve`'s own forced calls picked it 2 to 5 of 10 times at 507 tokens.
 
-A **forced** tool call works. Set `tool_choice: "required"`, or name a function, and the
-proxy translates the call into structured output and returns real `tool_calls`. Only
-`auto` stays broken, on purpose: auto must be able to answer without a call, and when the
-model has that option it takes it every time. If you can say that you want a tool, force
-it.
+Caution: a forced call returns exactly one tool call, and it replaces your own
+`response_format`. Use `auto` when a reply may need several calls.
 
-Caution: a forced tool call replaces your own `response_format`. The two cannot both
-hold.
+With five or more tools, `auto` often picks the wrong one. Offer fewer tools, or force
+the call.
 
 ## What the proxy corrects
 
@@ -114,18 +112,20 @@ hold.
 | Rejects the `developer` role | Sends it as `system` |
 | Rejects `reasoning_effort` on `system` | Removes it for `system`. Forwards it to `pcc`, where it adds hidden reasoning tokens. |
 | Rejects a `type` array such as `["string","null"]` | Keeps the first non-null type |
-| Rejects a `$defs` schema that lacks Apple's dialect keys | Inlines every `$ref` and removes `$defs` |
-| Can hang on a cyclic `$defs` schema | Rejects it with `400 cyclic_schema` |
+| Rejects a `$ref` it cannot resolve, and every `$ref` in tool parameters | Inlines every `$ref`, from `$defs` or `definitions`, and removes the tables |
+| Rejects a titled string without an `enum`, which pydantic emits for every field | Removes `title` from every node that is not an object |
+| Works for about 2 minutes on a cyclic `$defs` schema, then fails | Rejects it at once with `400 cyclic_schema` |
 | Rejects a tool with no `description` | Sends an empty description |
-| Rejects a forced `tool_choice` | Translates it into structured output |
+| Ignores `tool_choice: "none"` and writes a call as text | Removes the tools from the request |
+| Routes forced calls poorly among many tools | Translates a forced call into structured output |
 | Refuses requests with `Origin` or `Referer` headers | Removes them, so browser clients work |
 | Refuses a body sent as `text/plain`, a form, or multipart | Sends the body as `application/json` |
-| Leaks template markers into `content` | Removes them if you set `FM_STRIP_TEMPLATE_MARKERS=1` |
 
 ## Errors
 
 Errors come back in the OpenAI shape, `{"error": {"message", "type", "code"}}`, typed so
-that a client can branch on the cause.
+that a client can branch on the cause. A non-streaming `invalid_request_error` that
+`fm serve` sent as a 500 comes back as a 400, so an OpenAI SDK does not retry it.
 
 | `type` / `code` | Cause | Retry |
 |---|---|---|
@@ -134,7 +134,6 @@ that a client can branch on the cause.
 | `invalid_request_error` / `model_unavailable` | `pcc` outside Terminal.app. | No. |
 | `invalid_request_error` / `cyclic_schema` | A `response_format` schema refers to itself. | No. |
 | `invalid_request_error` / `json_object_unsupported` | `response_format: {"type": "json_object"}`. `fm serve` supports only `json_schema`. | No. Send a JSON schema. |
-| `invalid_request_error` / `tool_choice_unsupported` | A forced `tool_choice` that the proxy could not translate, such as a function that is not in `tools`. | No. |
 | `server_error` / `generation_parse_failed` | `fm serve` could not parse the arguments that the model generated. | No. |
 | `invalid_request_error` / `provider_rejected` | A `--model-provider` server answered with a 4xx, such as an unknown model. | No. |
 | `invalid_request_error` / `cross_site_refused` | `fm serve` refused the request as cross-site. The proxy removes the usual causes, so report this as a bug. | No. |
@@ -162,7 +161,6 @@ The proxy reads its configuration from the environment.
 | `PROXY_PORT` | `1977` | The port the proxy listens on. |
 | `FM_PORT` | `1976` | The port `fm serve` listens on. |
 | `FM_BIN` | `/usr/bin/fm` | The `fm` binary, used to count tokens when `fm serve` sends no usage. |
-| `FM_STRIP_TEMPLATE_MARKERS` | off | Set `1` to remove leaked template markers from `content`. |
 | `CORS_ORIGIN` | `*` | The value of `Access-Control-Allow-Origin`. |
 | `FM_MAX_RETRIES` | `4` | Retries for a transient failure. `0` turns retries off. |
 | `FM_RETRY_BASE_MS` | `1000` | The first retry delay. It doubles for each attempt. |

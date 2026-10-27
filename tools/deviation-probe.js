@@ -51,8 +51,8 @@ const record = (id, what, handled, evidence) => { RESULTS.push({ id, what, handl
   r = await chat({ model: "system", messages: M, tools: [noDesc], max_tokens: 20 });
   record(3, "tool without description accepted", r.status === 200, `status=${r.status}`);
 
-  // 4. fm serve cannot take $defs/$ref in response_format: it 400s without its own
-  //    dialect and hangs with it. pydantic and zod emit this shape by default.
+  // 4. fm serve 400s a $defs entry without a `title`. pydantic and zod emit $defs/$ref
+  //    for every named type.
   r = await chat({ model: "system", max_tokens: 120, stream: false, messages: [{ role: "user", content: "Person named Ada at 12 Elm. JSON." }],
     response_format: { type: "json_schema", json_schema: { name: "P", schema: { type: "object", properties: { name: { type: "string" }, addr: { $ref: "#/$defs/A" } }, required: ["name", "addr"], $defs: { A: { type: "object", properties: { street: { type: "string" } }, required: ["street"] } } } } } }, 45000);
   let j = J(r);
@@ -64,10 +64,9 @@ const record = (id, what, handled, evidence) => { RESULTS.push({ id, what, handl
     tools: [{ type: "function", function: { name: "set_home", description: "Set home", parameters: { type: "object", properties: { home: { $ref: "#/$defs/Ad" } }, required: ["home"], $defs: { Ad: { type: "object", properties: { city: { type: "string" } }, required: ["city"] } } } } }] });
   record(5, "$ref in tool parameters accepted", r.status === 200, `status=${r.status}`);
 
-  // 6. fm serve answers a forced tool_choice with 500 "unsupported generation guide".
-  //    A proxy must not forward it: it can translate the forced call into a
-  //    response_format schema and let constrained decoding make the call instead.
-  //    This asserts a REAL tool_call comes back, not merely that the failure is quick.
+  // 6. A forced tool_choice is translated into a response_format schema, because fm
+  //    serve's own forced calls route worse among many tools. This asserts that a REAL
+  //    tool_call comes back.
   r = await chat({ model: "system", messages: M, tools: [TOOL], tool_choice: "required", max_tokens: 20 }, 45000);
   j = J(r);
   const call6 = j?.choices?.[0]?.message?.tool_calls?.[0];

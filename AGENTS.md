@@ -6,7 +6,7 @@
 > README.
 
 `fm-proxy` puts an OpenAI-compatible API in front of Apple's `fm serve` and corrects the
-places where `fm serve` departs from the OpenAI API. It supports macOS 27.0 Beta 7 and
+places where `fm serve` departs from the OpenAI API. It supports macOS 27.2 and
 later. It has no dependencies.
 
 ## Commands
@@ -34,7 +34,7 @@ later. It has no dependencies.
 | `src/server.js` | HTTP server, retry plan, and attempt gate. |
 | `src/relay-stream.js` | Relays a streaming completion. |
 | `src/relay-json.js` | Relays a non-streaming completion. |
-| `src/text.js` | `stop` sequences and template-marker removal. |
+| `src/text.js` | `stop` sequences. |
 | `src/tokens.js` | Token counts for the one case where `fm serve` sends no usage. |
 | `src/http.js` | CORS headers, response heads, and logging. |
 

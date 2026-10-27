@@ -10,7 +10,7 @@ Three layers. Run them in order. Each catches what the layer above cannot.
 
 ## Layer 1 — unit and integration
 
-`npm test`. Expect **158 pass, 0 fail**. Without `fm`, as on a CI runner, expect 156 pass
+`npm test`. Expect **163 pass, 0 fail**. Without `fm`, as on a CI runner, expect 161 pass
 and 2 skipped.
 
 A skipped test means the `fm` CLI is unavailable. Check the licence with `fm license
@@ -21,7 +21,7 @@ agreement.
 
 The strongest check for "nothing changed". Model output is not repeatable, so this runs
 the proxy against a recording stub instead of the real engine, and records the exact
-bytes the proxy forwards for 14 fixed requests plus 3 endpoints.
+bytes the proxy forwards for 28 fixed requests plus 3 endpoints.
 
 ```bash
 export FM_BIN=/nonexistent   # see the caution below
@@ -49,7 +49,10 @@ a diff:
 - a missing `function.description` becomes `""`
 - a `$ref` tool parameter arrives resolved, not as `{}`
 - a `$defs` response schema arrives inlined, with no `$defs`
-- a **cyclic** `$defs` schema keeps `$defs` and gains the dialect
+- a `definitions` ref is inlined, in tool params and in `response_format`
+- `title` is removed from every primitive in `response_format`; a parameter `description` is kept
+- `tool_choice: "none"` sends no `tools` and no `tool_choice`
+- a forced call on a `$ref` tool sends a dispatch schema with no `$ref`
 - a `developer` message role is rewritten to `system`
 - a `type: ["T","null"]` array collapses to `type: "T"`, in tool params and in
   `response_format`, at every depth

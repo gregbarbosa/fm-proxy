@@ -83,6 +83,10 @@ const TOOL_GRID = { type: "function", function: { name: "grid", description: "Gr
 const TOOL_NULLABLE = { type: "function", function: { name: "note", description: "Note", parameters: { type: "object", properties: { city: { type: "string" }, note: { type: ["string", "null"] } }, required: ["city", "note"] } } };
 const RF_NULLABLE = { type: "json_schema", json_schema: { name: "N", schema: { type: "object", properties: { a: { type: ["string", "null"] }, list: { type: "array", items: { type: ["number", "null"] } } }, required: ["a"] } } };
 const RF_DEFS = { type: "json_schema", json_schema: { name: "P", schema: { type: "object", properties: { name: { type: "string" }, address: { $ref: "#/$defs/A" } }, required: ["name", "address"], $defs: { A: { type: "object", properties: { street: { type: "string" } }, required: ["street"] } } } } };
+const TOOL_DESCRIBED = { type: "function", function: { name: "forecast", description: "Forecast", parameters: { type: "object", properties: { date: { type: "string", title: "Date", description: "YYYY-MM-DD" } }, required: ["date"] } } };
+const TOOL_DEFINITIONS = { type: "function", function: { name: "set_home", description: "Set home", parameters: { type: "object", properties: { home: { $ref: "#/definitions/Address" } }, required: ["home"], definitions: { Address: { type: "object", properties: { city: { type: "string" } }, required: ["city"] } } } } };
+const RF_PYDANTIC = { type: "json_schema", json_schema: { name: "Person", schema: { type: "object", title: "Person", properties: { name: { type: "string", title: "Name" }, address: { $ref: "#/$defs/Address" } }, required: ["name", "address"], $defs: { Address: { type: "object", title: "Address", properties: { street: { type: "string", title: "Street" } }, required: ["street"] } } } } };
+const RF_DEFINITIONS = { type: "json_schema", json_schema: { name: "P", schema: { type: "object", properties: { p: { $ref: "#/definitions/P" } }, required: ["p"], definitions: { P: { type: "object", properties: { a: { type: "integer" } }, required: ["a"] } } } } };
 const RF_CYCLE = { type: "json_schema", json_schema: { name: "N", schema: { type: "object", properties: { root: { $ref: "#/$defs/Node" } }, $defs: { Node: { type: "object", properties: { child: { $ref: "#/$defs/Node" } } } } } } };
 const M = [{ role: "user", content: "Say hi" }];
 
@@ -108,6 +112,12 @@ const CASES = [
   ["response_format $defs", { model: "system", messages: M, response_format: RF_DEFS, max_tokens: 10, stream: false }],
   ["response_format cyclic", { model: "system", messages: M, response_format: RF_CYCLE, max_tokens: 10, stream: false }],
   ["image part", { model: "system", messages: [{ role: "user", content: [{ type: "text", text: "hi" }, { type: "image_url", image_url: { url: "data:image/png;base64,iVBORw0KGgo=" } }] }], max_tokens: 10, stream: false }],
+  ["tool_choice none drops tools", { model: "system", messages: M, max_tokens: 10, stream: false, tools: [TOOL], tool_choice: "none" }],
+  ["forced call on a $ref tool", { model: "system", messages: M, max_tokens: 10, stream: false, tools: [TOOL_REF], tool_choice: "required" }],
+  ["tool param description kept", { model: "system", messages: M, tools: [TOOL_DESCRIBED], max_tokens: 10, stream: false }],
+  ["tool with definitions ref", { model: "system", messages: M, tools: [TOOL_DEFINITIONS], max_tokens: 10, stream: false }],
+  ["response_format pydantic titles", { model: "system", messages: M, response_format: RF_PYDANTIC, max_tokens: 10, stream: false }],
+  ["response_format definitions ref", { model: "system", messages: M, response_format: RF_DEFINITIONS, max_tokens: 10, stream: false }],
   ["unknown model", { model: "not-a-model", messages: M, max_tokens: 10, stream: false }],
 ];
 

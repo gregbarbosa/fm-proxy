@@ -99,15 +99,16 @@ Audit recipe after any OS update:
    reverse also happens, so re-test the known walls separately. Run the three test
    layers in `tools/TEST_PLAN.md`, then re-check by hand:
    - tool calling — works natively on 26B123. Check that `tool_calls` is still populated,
-     on both paths. Up to 27.2 Beta 2 it never was
+     on both paths, and that `tool_choice: "none"` still needs the proxy to remove the
+     tools. Re-measure forced routing with five tools, native against the translation:
+     the translation exists only because it routes better
    - `$defs` in `response_format` — an entry with no `title` 400s; a **cyclic** one
      hung the model service up to 27.2 Beta 2 and ran for about 2 minutes on 26B123, so
      test it last and wait for a control request to pass
-   - forced `tool_choice` — raw `fm serve` returns a real `tool_call` on 26B123. Up to
-     27.2 Beta 2 it answered 500 "unsupported generation guide". Through the proxy it
-     must return a real `tool_call`: forced dispatch depends on `response_format` and
-     constrained decoding continuing to work, so if Apple breaks those, forced tool
-     calling breaks silently. `node tools/deviation-probe.js 1977` check 6 covers this.
+   - forced `tool_choice` — through the proxy it must return a real `tool_call`: forced
+     dispatch depends on `response_format` and constrained decoding continuing to work,
+     so if Apple breaks those, forced tool calling breaks silently.
+     `node tools/deviation-probe.js 1977` check 6 covers this.
    - a tool with no `function.description` — 400s the whole request
    - omitted `stream` — returns SSE, not JSON
    - `n > 1` — 400s
@@ -135,7 +136,7 @@ can appear and then clear itself. `fm available` does not detect that state.
 
 ## Release history
 
-Beta 7 and later are the supported builds. The proxy carries no code for earlier ones.
+macOS 27.2 and later are the supported builds. The proxy carries no code for earlier ones.
 This table records how the upstream behaviour arrived where it is. The table in
 `docs/upstream-behaviour.md` is
 authoritative for what is true now.
