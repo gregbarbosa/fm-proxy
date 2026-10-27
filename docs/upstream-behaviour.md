@@ -28,6 +28,7 @@ re-derive it from the release history in `docs/audit.md`.
 | `$defs` entry with no `title` | `400` naming `undefinedReferences` |
 | `$defs`, **cyclic** | A prompt that makes it recurse generates for about 2 minutes (114 s measured), then fails with `500` context exceeded. A control request passed 2 s later. |
 | `#/definitions/` ref | `400` `undefinedReferences`. Only `$defs` resolves. |
+| Optional nullable field, `anyOf:[{type:string},{type:null}]` | When the prompt does not mention the field, the model often generates without end and fails with `500` context exceeded after about 88 s. Seen 4/6, streaming and not. The same field as `{type:string}` failed 1/6. |
 | Titled string schema | `400` unless it carries a non-empty `enum`. pydantic titles every field. |
 | `array<array<object>>` tool param | Accepted natively |
 | Vision | Real image understanding. A 256 px PNG costs 131 `prompt_tokens`. |
@@ -270,6 +271,14 @@ Two shapes to avoid:
 that is not an object. A ref that does not resolve is forwarded, and `fm serve` names it
 in its `400`. This matters because pydantic, zod-to-json-schema, and TypeBox all emit
 refs for named types, and pydantic titles every field.
+
+**Nullable unions.** An optional field typed `anyOf:[X, {type:"null"}]`, which pydantic
+emits for `Optional[X] = None`, makes the model run away when the prompt gives no value
+for it. The reply grows until the context is exceeded, about 88 s later. The proxy
+collapses such a union to `X` and drops a `default: null`. Through the proxy, the same
+pydantic schema failed 1 time in 11 streaming requests, against 4 in 6 before. Repeated
+runaways can leave the model service failing with
+`com.apple.SensitiveContentAnalysisML error 15` for about 8 minutes.
 
 Warning: a cyclic `$defs` has no finite inline form, and forwarding one ties up the model
 service for about 2 minutes. The proxy rejects it with `400` `cyclic_schema` before it

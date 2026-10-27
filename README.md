@@ -114,6 +114,7 @@ the call.
 | Rejects a `type` array such as `["string","null"]` | Keeps the first non-null type |
 | Rejects a `$ref` it cannot resolve, and every `$ref` in tool parameters | Inlines every `$ref`, from `$defs` or `definitions`, and removes the tables |
 | Rejects a titled string without an `enum`, which pydantic emits for every field | Removes `title` from every node that is not an object |
+| Often generates without end on an optional nullable field, `anyOf:[X, {type:"null"}]` | Collapses the union to `X` |
 | Works for about 2 minutes on a cyclic `$defs` schema, then fails | Rejects it at once with `400 cyclic_schema` |
 | Rejects a tool with no `description` | Sends an empty description |
 | Ignores `tool_choice: "none"` and writes a call as text | Removes the tools from the request |
@@ -149,6 +150,10 @@ that a client can branch on the cause. A non-streaming `invalid_request_error` t
   accepted and ignored.
 - An image must be a base64 `data:` URL. File paths and other part shapes are not
   supported.
+- A `response_format` reply can still run away until the context is exceeded, about
+  88 s later. Through the proxy, a pydantic schema with an optional field did this in
+  about 1 of 11 requests. Set a client timeout, and give a value for each field in the
+  prompt.
 - `fm serve` is beta software. Its behaviour changes between builds.
 
 ## Options
