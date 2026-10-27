@@ -100,6 +100,7 @@ const CASES = [
   ["developer message", { model: "system", messages: [{ role: "developer", content: "Be brief." }, ...M], max_tokens: 10, stream: false }],
   ["forced tool_choice required", { model: "system", messages: M, max_tokens: 10, stream: false, tools: [TOOL], tool_choice: "required" }],
   ["forced named function", { model: "system", messages: M, max_tokens: 10, stream: false, tools: [TOOL], tool_choice: { type: "function", function: { name: "get_weather" } } }],
+  ["forced call, streaming, usage declined", { model: "system", messages: M, stream: true, stream_options: { include_usage: false }, tools: [TOOL], tool_choice: "required" }],
   ["auto tool_choice stays native", { model: "system", messages: M, max_tokens: 10, stream: false, tools: [TOOL], tool_choice: "auto" }],
   ["stop sequences", { model: "system", messages: M, max_tokens: 10, stream: false, stop: ["STOP"] }],
   ["stop sequences streaming", { model: "system", messages: M, max_tokens: 10, stream: true, stop: ["STOP"] }],

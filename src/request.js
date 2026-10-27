@@ -72,10 +72,14 @@ function prepareUpstream(req, body) {
   // A dispatched reply must arrive whole before it can become tool_calls, so ask for a
   // non-streaming reply and build the stream on the way back.
   const dispatchStreamOut = !!(dispatch && parsed.stream);
-  if (dispatchStreamOut) parsed.stream = false;
-  const isStream = !!(parsed && parsed.stream);
   const clientDeclinedUsage = !!(parsed && parsed.stream_options &&
     parsed.stream_options.include_usage === false);
+  if (dispatchStreamOut) {
+    parsed.stream = false;
+    // stream_options belongs to a streaming request only.
+    delete parsed.stream_options;
+  }
+  const isStream = !!(parsed && parsed.stream);
 
   let cappedAt = null;
   if (isChat && parsed) {

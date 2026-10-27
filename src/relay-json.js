@@ -53,7 +53,7 @@ function fixReply(obj, ctx) {
 }
 
 // A dispatched request whose client asked for SSE: turn the buffered reply into frames.
-function emitSynthesisedStream(res, obj, status, model) {
+function emitSynthesisedStream(res, obj, status, model, includeUsage) {
   writeSseHead(res, status);
   const ch = obj.choices && obj.choices[0] ? obj.choices[0] : {};
   const meta = { id: obj.id || "chatcmpl-proxy", object: "chat.completion.chunk",
@@ -76,8 +76,9 @@ function emitSynthesisedStream(res, obj, status, model) {
   } else if (ch.message && typeof ch.message.content === "string" && ch.message.content) {
     send({ content: ch.message.content });
   }
-  res.write(`data: ${JSON.stringify({ ...meta, choices: [{ index: 0, delta: {},
-    finish_reason: ch.finish_reason || "stop" }], usage: obj.usage })}\n\n`);
+  const finish = { ...meta, choices: [{ index: 0, delta: {}, finish_reason: ch.finish_reason || "stop" }] };
+  if (includeUsage) finish.usage = obj.usage;
+  res.write(`data: ${JSON.stringify(finish)}\n\n`);
   res.write("data: [DONE]\n\n");
   res.end();
 }
@@ -121,7 +122,7 @@ function relayNonStreamingChat({ res, proxyRes, gate, ctx, reqStart }) {
     gate.markCommitted();
     // An error is sent as JSON even when the client asked for SSE, as OpenAI does.
     if (ctx.dispatchStreamOut && obj && !isErrorPayload(obj)) {
-      emitSynthesisedStream(res, obj, status, ctx.model);
+      emitSynthesisedStream(res, obj, status, ctx.model, !ctx.clientDeclinedUsage);
       return;
     }
     const out = obj ? JSON.stringify(obj) : raw;

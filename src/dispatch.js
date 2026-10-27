@@ -40,8 +40,9 @@ function buildToolDispatch(parsed) {
   }
   const toolNames = chosen.map((f) => f.name);
   return {
-    // "required" requires no single key, so any one tool satisfies the schema.
-    schema: { type: "object", properties, required: named ? [named] : [] },
+    // With several tools, "required" requires no single key, so any one tool satisfies
+    // the schema. With one tool, or a named one, that key is required.
+    schema: { type: "object", properties, required: toolNames.length === 1 ? toolNames : [] },
     instruction: dispatchInstruction(toolNames),
     toolNames,
   };

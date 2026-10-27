@@ -279,3 +279,27 @@ test("the dispatch instruction is added as a part to a system message with conte
   assert.match(content[0].text, /MUST call exactly one/);
   assert.deepStrictEqual(content[1], { type: "text", text: "Be terse." });
 });
+
+// With one tool, "required" can name it. An empty object then cannot satisfy the schema.
+test("buildToolDispatch: required with one tool requires that tool's key", () => {
+  const d = buildToolDispatch(JSON.parse(FORCED_REQ(false)));
+  assert.deepStrictEqual(d.schema.required, ["get_weather"]);
+});
+
+// The upstream request is non-streaming, so the client's stream_options must not go up,
+// and the built stream must honour include_usage: false.
+test("streaming dispatch: stream_options stays local, and include_usage false is honoured", async (t) => {
+  const stack = await startStack({ handler: (req, parsed, res) => {
+    res.writeHead(200, { "content-type": "application/json" });
+    res.end(JSON.stringify({ id: "x", object: "chat.completion",
+      choices: [{ index: 0, message: { role: "assistant", content: '{"get_weather":{"city":"Paris"}}' },
+        finish_reason: "stop" }], usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 } }));
+  } });
+  t.after(() => stack.stop());
+  const body = JSON.parse(FORCED_REQ(true));
+  body.stream_options = { include_usage: false };
+  const r = await postChat(stack, JSON.stringify(body));
+  assert.ok(!("stream_options" in stack.getLastBody()), JSON.stringify(stack.getLastBody()));
+  assert.ok(r.body.includes('"finish_reason":"tool_calls"'), r.body);
+  assert.ok(!r.body.includes('"usage"'), r.body);
+});
