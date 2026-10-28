@@ -175,7 +175,7 @@ The proxy reads its configuration from the environment.
 | `FM_MAX_RETRIES` | `4` | Retries for a transient failure. `0` turns retries off. |
 | `FM_RETRY_BASE_MS` | `1000` | The first retry delay. It doubles for each attempt. |
 | `FM_RETRY_CAP_MS` | `15000` | The longest retry delay. |
-| `FM_UPSTREAM_TIMEOUT_MS` | `180000` | The longest a chat request may take, retries included. Then the client gets `upstream_timeout`. A full reply takes about 2 minutes. `0` turns it off. |
+| `FM_UPSTREAM_TIMEOUT_MS` | `180000` | The longest a chat request may take, retries included. Then the client gets `upstream_timeout`. A full reply takes about 2 minutes. `0` turns it off. `fm serve` keeps generating the abandoned reply, so the next request can wait for it. |
 
 Warning: the proxy ignores the API key. If you set `PROXY_HOST=0.0.0.0`, any host on
 your network can use the model.

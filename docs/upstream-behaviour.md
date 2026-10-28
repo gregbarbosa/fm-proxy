@@ -117,6 +117,11 @@ Caution: a forced call returns exactly one tool call, and it replaces a caller's
 
 ### Operational notes
 
+- **A closed connection does not stop a generation.** When a client disconnects, `fm serve`
+  keeps generating the abandoned reply, and the next request waits for it. Measured on
+  26B123: after a long reply was cut off at 5 s, short requests sent in the next 15 s
+  waited, and the first one passed about 30 s later. `FM_UPSTREAM_TIMEOUT_MS` frees the
+  client, not the model.
 - **`fm models` (renamed from `fm available` in the 27.2 beta) is not a health check.**
   It reports the system model as available even while every inference request fails.
   Test health with a real request.
