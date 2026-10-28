@@ -72,6 +72,10 @@ function errorStatus(cls, upstreamStatus) {
 const UPSTREAM_CLOSED = { type: "server_error", code: "upstream_closed", retry: true,
   label: "UPSTREAM CLOSED", clientMessage: "fm serve closed the connection before the reply ended" };
 
+// The request ran past FM_UPSTREAM_TIMEOUT_MS. A retry would run as long again.
+const UPSTREAM_TIMEOUT = { type: "server_error", code: "upstream_timeout", retry: false,
+  label: "UPSTREAM TIMEOUT", clientMessage: "fm serve did not finish the reply in time (FM_UPSTREAM_TIMEOUT_MS)" };
+
 function typedError(cls, msg) {
   return { message: cls.clientMessage || msg || "upstream error", type: cls.type, code: cls.code };
 }
@@ -80,4 +84,4 @@ function errorFrame(cls, msg) {
   return `data: ${JSON.stringify({ error: typedError(cls, msg) })}\n\n`;
 }
 
-module.exports = { classifyError, errorStatus, UPSTREAM_CLOSED, isErrorPayload, typedError, errorFrame };
+module.exports = { classifyError, errorStatus, UPSTREAM_CLOSED, UPSTREAM_TIMEOUT, isErrorPayload, typedError, errorFrame };

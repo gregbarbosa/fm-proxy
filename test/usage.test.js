@@ -32,9 +32,12 @@ test("tok/s: streaming completion logs [toks] stream with ttft", async () => {
     assert.match(line, /model=system/);
     assert.match(line, /\sstream\s/);
     assert.match(line, /out=\d+/);          // non-zero output tokens ("hello world")
-    assert.match(line, /dur=[0-9.]+s/);
+    assert.match(line, /dur=\d+ms/);       // the whole request, never 0
     assert.match(line, /ttft=\d+ms/);       // streaming reports time-to-first-token
-    assert.match(line, /=>\s+[0-9.]+ tok\/s/);
+    // The stub sends the reply in one chunk. Time after the first token is then 0,
+    // which logged dur=0.00s and 0.0 tok/s.
+    assert.ok(!/dur=0ms/.test(line), line);
+    assert.ok(Number(line.match(/=>\s+([0-9.]+) tok\/s/)[1]) > 0, line);
   } finally { await stack.stop(); }
 });
 
@@ -51,7 +54,7 @@ test("tok/s: non-streaming completion logs [toks] sync without ttft", async () =
     assert.match(line, /model=system/);
     assert.match(line, /\ssync\s/);
     assert.match(line, /out=1\b/);
-    assert.match(line, /dur=[0-9.]+s/);
+    assert.match(line, /dur=\d+ms/);
     assert.match(line, /=>\s+[0-9.]+ tok\/s/);
     // Non-streaming has no first-token timestamp, so ttft must NOT appear.
     assert.doesNotMatch(line, /ttft=/);

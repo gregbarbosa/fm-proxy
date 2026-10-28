@@ -144,6 +144,7 @@ as a 400, so an OpenAI SDK does not retry it.
 | `server_error` / `model_service_unavailable` | The on-device model service is in the `SensitiveContentAnalysisML error 15` state. It clears itself, in less than a minute to about 8 minutes. | Yes, after some minutes. The proxy does not retry it. |
 | `rate_limit_exceeded` | A transient capacity error. The proxy has already retried it. | Yes, later. |
 | `server_error` / `upstream_closed` | `fm serve` closed the connection before the reply ended. The proxy has already retried it if nothing was sent. | Yes. |
+| `server_error` / `upstream_timeout` | The request ran past `FM_UPSTREAM_TIMEOUT_MS`. Before any output it is a `504`; after, an error frame and `[DONE]`. | No. A retry runs as long again. |
 | `server_error` / `upstream_unreachable` | `fm serve` is not running. | After you start it. |
 
 ## Limits
@@ -156,8 +157,8 @@ as a 400, so an OpenAI SDK does not retry it.
   supported.
 - A `response_format` reply can still run away until the context is exceeded, about
   88 s later. Through the proxy, a pydantic schema with a nullable field did this in
-  1 to 2 of 10 requests. Set a client timeout, and give a value for each field in the
-  prompt.
+  1 to 2 of 10 requests. Set `FM_UPSTREAM_TIMEOUT_MS` or a client timeout below 88 s, and
+  give a value for each field in the prompt.
 - `fm serve` is beta software. Its behaviour changes between builds.
 
 ## Options
@@ -174,6 +175,7 @@ The proxy reads its configuration from the environment.
 | `FM_MAX_RETRIES` | `4` | Retries for a transient failure. `0` turns retries off. |
 | `FM_RETRY_BASE_MS` | `1000` | The first retry delay. It doubles for each attempt. |
 | `FM_RETRY_CAP_MS` | `15000` | The longest retry delay. |
+| `FM_UPSTREAM_TIMEOUT_MS` | `180000` | The longest a chat request may take, retries included. Then the client gets `upstream_timeout`. A full reply takes about 2 minutes. `0` turns it off. |
 
 Warning: the proxy ignores the API key. If you set `PROXY_HOST=0.0.0.0`, any host on
 your network can use the model.

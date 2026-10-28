@@ -266,3 +266,75 @@ test("a matched stop sequence reports stop, not length, at the cap (streaming)",
     assert.ok(!res.body.includes("three"), res.body);
   } finally { await stack.stop(); }
 });
+
+// ── Upstream timeout ────────────────────────────────────────────────────────
+// fm serve can run away for about 88 s, or stall. FM_UPSTREAM_TIMEOUT_MS bounds the
+// whole request, retries included, and a timeout is not retried.
+const TIMEOUT_ENV = { FM_UPSTREAM_TIMEOUT_MS: "300" };
+
+test("upstream timeout before any reply: a JSON 504, sent once", async () => {
+  let hits = 0;
+  const stack = await startStack({ maxRetries: 4, env: TIMEOUT_ENV, handler: () => { hits++; } });
+  try {
+    const t0 = Date.now();
+    const res = await request(stack.proxyPort,
+      { method: "POST", path: "/v1/chat/completions", headers: { "content-type": "application/json" } },
+      JSON.stringify({ model: "system", stream: false, messages: [{ role: "user", content: "hi" }] }));
+    assert.strictEqual(res.status, 504, res.body);
+    assert.strictEqual(JSON.parse(res.body).error.code, "upstream_timeout");
+    assert.strictEqual(hits, 1);
+    assert.ok(Date.now() - t0 < 2000, `took ${Date.now() - t0}ms`);
+  } finally { await stack.stop(); }
+});
+
+test("upstream timeout mid-stream: the output so far, an error frame, and [DONE]", async () => {
+  const stack = await startStack({ env: TIMEOUT_ENV, handler: (req, parsed, res) => {
+    res.writeHead(200, { "content-type": "text/event-stream" });
+    res.write(`data: ${JSON.stringify({ id: "c", choices: [{ index: 0, delta: { content: "Hello" } }] })}\n\n`);
+  } });
+  try {
+    const res = await request(stack.proxyPort,
+      { method: "POST", path: "/v1/chat/completions", headers: { "content-type": "application/json" } },
+      JSON.stringify({ model: "system", stream: true, messages: [{ role: "user", content: "hi" }] }));
+    assert.strictEqual(res.status, 200);
+    assert.ok(res.body.includes("Hello"), res.body);
+    assert.ok(res.body.includes('"code":"upstream_timeout"'), res.body);
+    assert.ok(res.body.trimEnd().endsWith("data: [DONE]"), res.body);
+  } finally { await stack.stop(); }
+});
+
+test("FM_UPSTREAM_TIMEOUT_MS=0 sets no timeout", async () => {
+  const stack = await startStack({ env: { FM_UPSTREAM_TIMEOUT_MS: "0" }, handler: (req, parsed, res) => {
+    setTimeout(() => {
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify({ id: "c", object: "chat.completion", model: "system",
+        choices: [{ index: 0, message: { role: "assistant", content: "late" }, finish_reason: "stop" }],
+        usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 } }));
+    }, 500);
+  } });
+  try {
+    const res = await request(stack.proxyPort,
+      { method: "POST", path: "/v1/chat/completions", headers: { "content-type": "application/json" } },
+      JSON.stringify({ model: "system", stream: false, messages: [{ role: "user", content: "hi" }] }));
+    assert.strictEqual(JSON.parse(res.body).choices[0].message.content, "late");
+  } finally { await stack.stop(); }
+});
+
+test("upstream timeout while a retry waits: a 504, and the retry never starts", async () => {
+  let hits = 0;
+  const stack = await startStack({ maxRetries: 4,
+    env: { FM_UPSTREAM_TIMEOUT_MS: "300", FM_RETRY_BASE_MS: "1000" },
+    handler: (req, parsed, res) => {
+      hits++;
+      res.writeHead(500, { "content-type": "application/json" });
+      res.end(JSON.stringify({ error: { type: "server_error", code: "500", message: "Service hiccup" } }));
+    } });
+  try {
+    const res = await request(stack.proxyPort,
+      { method: "POST", path: "/v1/chat/completions", headers: { "content-type": "application/json" } },
+      JSON.stringify({ model: "system", stream: false, messages: [{ role: "user", content: "hi" }] }));
+    assert.strictEqual(res.status, 504, res.body);
+    await new Promise((r) => setTimeout(r, 1200));
+    assert.strictEqual(hits, 1, "the pending retry must not start after the timeout");
+  } finally { await stack.stop(); }
+});

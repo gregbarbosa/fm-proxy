@@ -38,13 +38,17 @@ function diag(label, extra = "") {
   console.error(`[fm-proxy] *** ${label} ***` + (extra ? ` ${extra}` : ""));
 }
 
-// One throughput line per completion.
-function logToks(model, kind, completionTokens, durationMs, ttftMs) {
-  const secs = durationMs / 1000;
-  const tps = secs > 0 ? completionTokens / secs : 0;
+// One throughput line per completion. `dur` is the whole request. The rate counts from
+// the first token when there is one, but a reply that arrives in one chunk has no time
+// after its first token, so the rate then counts the whole request.
+function logToks(model, kind, completionTokens, totalMs, ttftMs) {
+  const total = Math.max(1, Math.round(totalMs));
+  const afterFirst = ttftMs != null ? total - ttftMs : 0;
+  const rateMs = afterFirst >= 1 ? afterFirst : total;
+  const tps = completionTokens / (rateMs / 1000);
   const ttft = ttftMs != null ? ` ttft=${Math.round(ttftMs)}ms` : "";
   console.error(`[toks] model=${model} ${kind} out=${completionTokens} ` +
-    `dur=${secs.toFixed(2)}s${ttft} => ${tps.toFixed(1)} tok/s`);
+    `dur=${total}ms${ttft} => ${tps.toFixed(1)} tok/s`);
 }
 
 module.exports = { CORS_HEADERS, relayHead, writeSseHead, writeJsonError, diag, logToks };

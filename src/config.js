@@ -14,4 +14,7 @@ module.exports = {
   MAX_RETRIES: Number(env.FM_MAX_RETRIES ?? 4),
   RETRY_BASE_MS: Number(env.FM_RETRY_BASE_MS ?? 1000),
   RETRY_CAP_MS: Number(env.FM_RETRY_CAP_MS ?? 15000),
+  // The longest a chat request may take, retries included. 0 turns it off. A full reply
+  // of about 4000 tokens takes about 2 minutes, and a runaway fails at about 88 s.
+  UPSTREAM_TIMEOUT_MS: Number(env.FM_UPSTREAM_TIMEOUT_MS ?? 180000),
 };

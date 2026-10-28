@@ -228,8 +228,7 @@ function relayStreamingChat({ res, proxyRes, gate, ctx, reqStart }) {
       usage = { prompt_tokens: pt, completion_tokens: ct, total_tokens: pt + ct };
     }
     const now = Date.now();
-    logToks(ctx.model, "stream", Number(usage.completion_tokens) || 0,
-      tFirstToken != null ? now - tFirstToken : now - reqStart,
+    logToks(ctx.model, "stream", Number(usage.completion_tokens) || 0, now - reqStart,
       tFirstToken != null ? tFirstToken - reqStart : null);
 
     // fm serve reports "stop" when it stopped at the cap. An abort wins over the cap, and

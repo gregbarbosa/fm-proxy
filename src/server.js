@@ -1,10 +1,11 @@
 // The HTTP server: accepts a request, forwards it to fm serve, and hands chat
 // completions to a relay. Other paths, such as /v1/models and /health, pass through.
 const http = require("http");
-const { FM_PORT, MAX_RETRIES, RETRY_BASE_MS, RETRY_CAP_MS } = require("./config");
+const { FM_PORT, MAX_RETRIES, RETRY_BASE_MS, RETRY_CAP_MS, UPSTREAM_TIMEOUT_MS } = require("./config");
 const { prepareUpstream } = require("./request");
 const { relayStreamingChat } = require("./relay-stream");
 const { relayNonStreamingChat } = require("./relay-json");
+const { UPSTREAM_TIMEOUT, typedError, errorFrame } = require("./errors");
 const { CORS_HEADERS, relayHead, writeJsonError, diag } = require("./http");
 
 // Retry state for one client request. It lives across attempts, and it cancels the
@@ -22,6 +23,11 @@ function createRetryPlan(res, fire) {
   return {
     get clientGone() { return clientGone; },
     setActiveReq(req) { activeReq = req; },
+    // Stop: no pending retry, and the attempt in flight is torn down.
+    cancel() {
+      if (retryTimer) { clearTimeout(retryTimer); retryTimer = null; }
+      if (activeReq) activeReq.destroy();
+    },
     // Schedule the next attempt with exponential backoff. False when none is left.
     schedule(attempt, reason) {
       if (attempt + 1 > MAX_RETRIES || clientGone) return false;
@@ -53,6 +59,23 @@ function createAttemptGate({ res, proxyRes, proxyReq, plan, attempt, isStream })
         if (proxyRes.statusCode !== 200) diag(`UPSTREAM HTTP ${proxyRes.statusCode}`);
       }
     },
+    // End the reply at the request deadline: a JSON 504 if nothing was sent, else an
+    // error frame and [DONE] after the output so far.
+    timeout() {
+      aborting = true;
+      proxyRes.destroy();
+      proxyReq.destroy();
+      if (!res.headersSent) {
+        committed = true;
+        writeJsonError(res, 504, typedError(UPSTREAM_TIMEOUT));
+        return;
+      }
+      if (isStream) {
+        res.write(errorFrame(UPSTREAM_TIMEOUT));
+        res.write("data: [DONE]\n\n");
+      }
+      res.end();
+    },
     fail(reason) {
       if (committed || aborting) return false;
       if (!plan.schedule(attempt, reason)) return false;
@@ -82,8 +105,25 @@ function handle(req, res, body) {
 
   const plan = createRetryPlan(res, (n) => forward(n));
 
+  // One deadline for the whole request, retries included. A timeout is not retried.
+  let timedOut = false;
+  let currentGate = null;
+  if (ctx.isChat && UPSTREAM_TIMEOUT_MS > 0) {
+    const deadline = setTimeout(() => {
+      if (res.writableEnded || res.destroyed) return;
+      timedOut = true;
+      diag(UPSTREAM_TIMEOUT.label, `after ${UPSTREAM_TIMEOUT_MS}ms`);
+      // The gate first: it marks the attempt as aborting before its sockets close.
+      if (currentGate) currentGate.timeout();
+      plan.cancel();
+      if (!res.writableEnded) writeJsonError(res, 504, typedError(UPSTREAM_TIMEOUT));
+    }, UPSTREAM_TIMEOUT_MS);
+    res.on("close", () => clearTimeout(deadline));
+  }
+
   function forward(attempt) {
     let gate = null;
+    currentGate = null;
     const proxyReq = http.request(
       { hostname: "127.0.0.1", port: FM_PORT, path: req.url, method: req.method, headers: ctx.headers },
       (proxyRes) => {
@@ -96,6 +136,7 @@ function handle(req, res, body) {
         }
         if (proxyRes.statusCode >= 400) diag(`UPSTREAM RESPONSE HTTP ${proxyRes.statusCode}`);
         gate = createAttemptGate({ res, proxyRes, proxyReq, plan, attempt, isStream: ctx.isStream });
+        currentGate = gate;
         const relay = ctx.isStream ? relayStreamingChat : relayNonStreamingChat;
         relay({ res, proxyRes, gate, ctx, reqStart });
       },
@@ -103,7 +144,7 @@ function handle(req, res, body) {
     plan.setActiveReq(proxyReq);
     proxyReq.on("error", (e) => {
       // Skip the teardowns this proxy caused itself.
-      if ((gate && gate.isAborting()) || plan.clientGone || res.destroyed) return;
+      if (timedOut || (gate && gate.isAborting()) || plan.clientGone || res.destroyed) return;
       if (ctx.isChat) diag("UPSTREAM REQ SOCKET ERROR", `— ${e.code || ""} ${e.message}`);
       writeJsonError(res, 502, { message: `fm serve unreachable: ${e.message}`,
         type: "server_error", code: "upstream_unreachable" });
