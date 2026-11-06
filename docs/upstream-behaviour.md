@@ -130,6 +130,11 @@ Caution: a forced call returns exactly one tool call, and it replaces a caller's
   refused while the same command in Terminal.app proceeds. `fm serve` inherits the
   context it was launched from, so a proxy in front of an agent-launched `fm serve`
   cannot reach `pcc` either. Launch the stack from Terminal.app if you want to test it.
+  Terminal.app is not enough on its own: `fm` also checks that every process between the
+  terminal session and itself is Apple-signed. Measured on 26B123: `fm-launch.sh` under
+  Homebrew's bash 5.3.20 (from `#!/usr/bin/env bash`) left `pcc` unavailable in
+  Terminal.app, and the same script under `/bin/bash` made it available. Check a binary
+  with `codesign --verify --test-requirement='=anchor apple' <path>`.
 - **`com.apple.SensitiveContentAnalysisML error 15` is environmental.** It appears on a
   machine still settling after an OS update, and it clears itself: on the RC it cleared
   in about 20 to 30 minutes with no intervention. An experiment ruled out both the cyclic
