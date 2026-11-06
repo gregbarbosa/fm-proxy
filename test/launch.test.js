@@ -1,8 +1,16 @@
 const { test } = require("node:test");
 const assert = require("node:assert");
 const path = require("node:path");
+const fs = require("node:fs");
 const { spawn } = require("node:child_process");
 const { freePort, request } = require("./helpers");
+
+// fm allows `pcc` only when every process above fm serve is Apple-signed. `env bash`
+// can pick Homebrew's bash, which is not, so the launcher must name Apple's /bin/bash.
+test("fm-launch.sh runs under Apple's /bin/bash, not the first bash on PATH", () => {
+  const firstLine = fs.readFileSync(path.join(__dirname, "..", "fm-launch.sh"), "utf8").split("\n")[0];
+  assert.strictEqual(firstLine, "#!/bin/bash");
+});
 
 // The launcher's flags must reach the proxy, not only the launcher's own messages.
 test("fm-launch.sh passes --fm-port, --proxy-port and --fm-bin to the proxy", async () => {

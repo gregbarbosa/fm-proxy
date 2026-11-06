@@ -1,4 +1,4 @@
-#!/usr/bin/env bash
+#!/bin/bash
 # fm-launch.sh — one command to bring up the whole stack:
 #
 #   Apple `fm serve`  +  fm-proxy.js (the OpenAI-compatible proxy)
@@ -6,6 +6,10 @@
 # fm serve runs in the FOREGROUND (this script blocks on it) so Ctrl-C reaches it
 # directly. The `system` model works from any terminal. The `pcc` model works only when
 # this script runs in Terminal.app, because fm serve inherits the launch context.
+#
+# The shebang is /bin/bash, not `/usr/bin/env bash`: fm allows `pcc` only when every
+# process above fm serve is Apple-signed, and this shell is one of them. Homebrew's bash
+# is not Apple-signed, so `env` finding it first on PATH turns `pcc` off.
 #
 # The proxy is a backgrounded child. Traps on INT/TERM/HUP/EXIT tear it down so it
 # can't orphan (Ctrl-C, closed terminal, or fm serve dying all clean up the proxy).

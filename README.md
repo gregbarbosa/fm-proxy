@@ -70,7 +70,9 @@ print(client.chat.completions.create(
 ```
 
 `pcc` works only when `fm serve` starts in Terminal.app. From any other terminal, or from
-an agent, `pcc` requests fail with `model_unavailable`. Each `pcc` request uses your
+an agent, `pcc` requests fail with `model_unavailable`. Every process between Terminal.app
+and `fm serve` must also be Apple-signed: a Homebrew shell, tmux, or another wrapper in
+that chain turns `pcc` off. `fm-launch.sh` runs under Apple's `/bin/bash` for this reason. Each `pcc` request uses your
 Private Cloud Compute quota; `GET /health` reports it.
 
 ## What works
